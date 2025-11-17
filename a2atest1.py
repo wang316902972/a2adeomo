@@ -602,13 +602,11 @@ class SQLReviewerAutoGen:
 
         except Exception as e:
             print(f"❌ AutoGen Agents 初始化失败: {e}")
-            # 创建一个备用的 Mock Agent
             self.reviewer_agent = None
             self.model_client = None
-            print("⚠️  将使用备用审核逻辑")
     
     async def _collect_stream_messages(self, team, task: str, timeout: int = 30) -> list:
-        """异步收集流式消息 - 修复版"""
+        """异步收集流式消息"""
         import sys
         messages = []
         
@@ -663,23 +661,6 @@ class SQLReviewerAutoGen:
         print("\n" + "="*80)
         print("🔍 SQL 审核流程启动")
         print("="*80)
-
-        # 检查 AutoGen Agent 是否可用
-        if self.reviewer_agent is None:
-            print("⚠️  AutoGen Agent 不可用，使用备用审核逻辑")
-            optimized_sql = optimization_result.get("optimized_sql", "")
-            original_sql = optimization_result.get("original_sql", "")
-
-            result = self._fallback_review(optimized_sql)
-            result["timestamp"] = datetime.now().isoformat()
-            result["agent"] = "fallback_reviewer"
-            result["comparison"] = self._compare_sqls(original_sql, optimized_sql)
-
-            print(f"\n✅ 备用审核完成")
-            print(f"   状态: {'✅ 通过' if result.get('approved') else '❌ 未通过'}")
-            print(f"   评分: {result.get('score', 0)}/100")
-
-            return result
 
         original_sql = optimization_result.get("original_sql", "")
         optimized_sql = optimization_result.get("optimized_sql", "")
@@ -776,12 +757,6 @@ class SQLReviewerAutoGen:
 
                 if content and len(str(content).strip()) > 0:
                     review_result = self._parse_review_response(str(content), optimized_sql)
-                else:
-                    print("⚠️  消息内容为空或无法提取")
-                    review_result = self._fallback_review(optimized_sql)
-            else:
-                print("⚠️  未收集到任何消息")
-                review_result = self._fallback_review(optimized_sql)
 
         except Exception as e:
             print(f"❌ AutoGen 审核出错: {e}")
@@ -807,14 +782,10 @@ class SQLReviewerAutoGen:
         return review_result
     
     def _parse_review_response(self, content: str, optimized_sql: str) -> Dict[str, Any]:
-        """解析 AutoGen 审核响应 - 增强版"""
+        """解析 AutoGen 审核响应"""
         try:
             # 尝试提取第一个完整的 JSON 对象
             json_start = content.find('{')
-            
-            if json_start == -1:
-                print("⚠️  内容中未找到 JSON 对象")
-                return self._fallback_review(optimized_sql)
             
             # 从第一个 { 开始查找匹配的 }
             brace_count = 0
@@ -828,15 +799,8 @@ class SQLReviewerAutoGen:
                     if brace_count == 0:
                         json_end = i + 1
                         break
-            
-            if json_end == -1:
-                print("⚠️  未找到完整的 JSON 对象（括号不匹配）")
-                return self._fallback_review(optimized_sql)
-            
             # 提取 JSON 字符串
             json_str = content[json_start:json_end]
-            print(f"🔍 JSON 预览: {json_str[:200]}...")
-            
             # 解析 JSON
             review_result = json.loads(json_str)
             print(f"✅ JSON 解析成功")
