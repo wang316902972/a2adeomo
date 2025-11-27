@@ -386,10 +386,10 @@ if __name__ == "__main__":
     ║              SQL 优化审核系统 FastAPI 服务                         ║
     ║                                                                  ║
     ║  启动命令:                                                        ║
-    ║    uvicorn fastapi_service:app --host 0.0.0.0 --port 8000       ║
+    ║    uvicorn fastapi_service:app --host 0.0.0.0 --port 8004       ║
     ║                                                                  ║
     ║  API 文档:                                                        ║
-    ║    http://localhost:8000/docs                                     ║
+    ║    http://localhost:8004/docs                                     ║
     ║                                                                  ║
     ║  主要端点:                                                        ║
     ║    POST /api/optimize          - 同步 SQL 优化                   ║
@@ -403,7 +403,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "fastapi_service:app",
         host="0.0.0.0",
-        port=8000,
+        port=8004,
         reload=True,
         log_level="info"
     )

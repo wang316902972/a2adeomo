@@ -32,8 +32,8 @@ from autogen_ext.models.openai import OpenAIChatCompletionClient
 from autogen_agentchat.base import TaskResult
 from autogen_agentchat.ui import Console
 
-os.environ["OPENAI_BASE_URL"] = "https://yunwu.ai/v1"
-os.environ["OPENAI_API_KEY"] = "sk-tEWaHDG6MWf1UENkaanThDQ3Ej4Dai39LS5XC5UXSuTlEu8n"
+os.environ["OPENAI_BASE_URL"] = "http://192.168.244.189:11434/v1"
+os.environ["OPENAI_API_KEY"] = "ollama"
 
 # 加载环境变量
 load_dotenv()
@@ -178,7 +178,7 @@ class SQLOptimizerCrew:
 
             # 配置 LLM
             self.llm = LLM(
-                model="openai/gpt-4o-mini",
+                model="mistral:latest",  # 使用Ollama服务器上的实际模型名称
                 temperature=0.1,  # 低温度以确保准确性
                 api_key=self.api_key,
                 base_url=self.base_url
@@ -554,7 +554,7 @@ class SQLReviewerAutoGen:
         try:
             # 创建 OpenAI 客户端，添加更多配置
             self.model_client = OpenAIChatCompletionClient(
-                model="gpt-4o-mini-2024-07-18",
+                model="mistral:latest",  # 使用Ollama服务器上的实际模型名称
                 api_key=self.api_key,
                 base_url=self.base_url,
                 # 添加超时和重试配置（如果支持的参数）
