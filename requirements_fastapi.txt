@@ -39,7 +39,7 @@ python-dotenv>=1.0.0,<2.0.0
 # 类型注解支持
 typing-extensions>=4.8.0,<5.0.0
 
-# HTTP客户端 (用于API调用)
+# HTTP客户端 (用于API调用和GitHub webhook)
 httpx>=0.25.0,<1.0.0
 
 # ==============================

@@ -1,1116 +1,1148 @@
 """
-A2A Framework Demo: SQL 优化审核系统
-整合 CrewAI (优化Agent) 和 AutoGen 0.4+ (审核Agent)
+FastAPI 服务：SQL 优化审核系统 API (单 Agent + SSH 架构)
+基于单 Agent 架构和 SSH 认证的 SQL 优化和审核功能
 
-安装依赖:
-pip install crewai crewai-tools autogen-agentchat autogen-core autogen-ext openai python-dotenv
+启动服务:
+uvicorn fastapi_service:app --host 0.0.0.0 --port 8000 --reload
 
-环境变量配置 (.env):
-OPENAI_API_KEY=your_api_key_here
+API 文档:
+http://localhost:8000/docs
+
+架构特点:
+- 单一综合 SQL 专家 Agent
+- SSH 方式访问 GitHub，更安全的认证
+- 简化的工作流程，高效执行
+- 集成分析、优化、报告于一体
+
+环境变量配置:
+GITHUB_SSH_KEY_PATH      - SSH 私钥文件路径
+GITHUB_SSH_KEY_CONTENT   - SSH 私钥内容 (可选)
+GITHUB_USER              - Git 用户名
+GITHUB_EMAIL             - Git 邮箱地址
+GITHUB_WEBHOOK_SECRET    - Webhook 密钥
+OPENAI_API_KEY           - LLM API 密钥
+OPENAI_BASE_URL          - LLM 基础 URL
 """
 
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Dict, Any, Optional, List
 import asyncio
 import json
-import os
-from typing import Dict, Any, List, Optional
+import logging
 from datetime import datetime
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    print("⚠️  dotenv 未安装，跳过 .env 文件加载")
-
-# CrewAI imports
-from crewai import Agent, Task, Crew, Process
-from crewai.tools import tool
-
-# AutoGen 0.7+ imports
-from autogen_agentchat.agents import AssistantAgent
-from autogen_agentchat.conditions import TextMentionTermination,MaxMessageTermination
-from autogen_agentchat.teams import RoundRobinGroupChat
-from autogen_ext.models.openai import OpenAIChatCompletionClient
-from autogen_agentchat.base import TaskResult
-from autogen_agentchat.ui import Console
-
-os.environ["OPENAI_BASE_URL"] = "http://192.168.244.189:11434/v1"
-os.environ["OPENAI_API_KEY"] = "ollama"
-
-# 加载环境变量
-load_dotenv()
-
-# ============================================================================
-# 1. CrewAI SQL 优化 Agent (完整实现)
-# ============================================================================
-
-@tool("SQL Analysis Tool")
-def analyze_sql_tool(sql_query: str) -> str:
-    """分析 SQL 语句，识别性能问题和优化机会
-
-    Args:
-        sql_query: 要分析的 SQL 查询语句
-
-    Returns:
-        分析结果字符串，包含发现的问题和建议
-    """
-    issues = []
-    sql_lower = sql_query.lower()
-
-    # 检查 SELECT *
-    if "select *" in sql_lower:
-        issues.append("❌ 使用 SELECT * 会检索所有列，建议明确指定需要的列")
-
-    # 检查 WHERE 子句
-    if "where" not in sql_lower and "from" in sql_lower:
-        issues.append("❌ 缺少 WHERE 子句可能导致全表扫描")
-
-    # 检查 JOIN 数量
-    join_count = sql_lower.count("join")
-    if join_count > 3:
-        issues.append(f"⚠️  发现 {join_count} 个 JOIN，可能影响性能")
-
-    # 检查索引使用
-    if "or" in sql_lower and "where" in sql_lower:
-        issues.append("⚠️  OR 条件可能无法有效使用索引")
-
-    # 检查通配符
-    if "like" in sql_lower and "'%" in sql_lower:
-        issues.append("❌ LIKE 前置通配符 '%xxx' 无法使用索引")
-
-    # 检查子查询
-    if sql_lower.count("select") > 1:
-        issues.append("💡 存在子查询，考虑是否可以用 JOIN 优化")
-
-    # 检查 DISTINCT
-    if "distinct" in sql_lower:
-        issues.append("💡 使用 DISTINCT 可能影响性能，检查是否必要")
-
-    # 检查排序
-    if "order by" in sql_lower:
-        issues.append("💡 ORDER BY 操作需要排序，确保相关列有索引")
-
-    if not issues:
-        return "✅ SQL 语句看起来不错，没有明显的性能问题"
-
-    return "发现以下问题:\n" + "\n".join(issues)
-
-@tool("SQL Optimization Tool")
-def generate_optimization_suggestions(sql_query: str) -> str:
-    """根据 SQL 分析结果生成具体的优化建议
-
-    Args:
-        sql_query: 要优化的 SQL 查询语句
-
-    Returns:
-        优化建议字符串
-    """
-    suggestions = []
-    sql_lower = sql_query.lower()
-
-    if "select *" in sql_lower:
-        suggestions.append("""
-优化建议 1: 明确列名
-- 问题: SELECT * 检索所有列
-- 方案: 只选择需要的列
-- 示例: SELECT id, name, email, created_at FROM users
-- 收益: 减少数据传输量，提升查询速度
-        """)
-
-    if "where" not in sql_lower and "from" in sql_lower:
-        suggestions.append("""
-优化建议 2: 添加过滤条件
-- 问题: 缺少 WHERE 子句
-- 方案: 添加合适的过滤条件
-- 示例: WHERE status = 'active' AND created_at >= '2024-01-01'
-- 收益: 减少扫描的行数，避免全表扫描
-        """)
-
-    if "like" in sql_lower and "'%" in sql_lower:
-        suggestions.append("""
-优化建议 3: 优化模糊查询
-- 问题: 前置通配符无法使用索引
-- 方案:
-  * 改为后置通配符: LIKE 'keyword%'
-  * 使用全文索引: MATCH...AGAINST
-  * 使用专门的搜索引擎: Elasticsearch
-- 收益: 大幅提升搜索性能
-        """)
-
-    if sql_lower.count("join") > 2:
-        suggestions.append("""
-优化建议 4: 优化多表关联
-- 问题: 过多的 JOIN 操作
-- 方案:
-  * 使用 CTE (WITH 子句) 分步处理
-  * 考虑反规范化存储
-  * 添加覆盖索引
-- 示例:
-  WITH user_orders AS (
-    SELECT user_id, COUNT(*) as order_count
-    FROM orders
-    GROUP BY user_id
-  )
-  SELECT u.*, uo.order_count FROM users u
-  JOIN user_orders uo ON u.id = uo.user_id
-        """)
-
-    if not suggestions:
-        return "当前 SQL 已经较为优化，建议:\n1. 确保相关列有索引\n2. 使用 EXPLAIN 分析执行计划\n3. 监控实际执行性能"
-
-    return "\n".join(suggestions)
-
-
-class SQLOptimizerCrew:
-    """CrewAI SQL 优化系统"""
-    def __init__(self, openai_api_key: Optional[str] = None):
-        self.api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
-        self.base_url =  os.getenv("OPENAI_BASE_URL")
-        if not self.api_key:
-            raise ValueError("需要设置 OPENAI_API_KEY 环境变量")
-
-        self._setup_llm()
-        self._setup_agents()
-
-    def _setup_llm(self):
-        """设置 LLM 配置"""
-        try:
-            # 尝试导入 LLM
-            from crewai import LLM
-
-            # 配置 LLM
-            self.llm = LLM(
-                model="mistral:latest",  # 使用Ollama服务器上的实际模型名称
-                temperature=0.1,  # 低温度以确保准确性
-                api_key=self.api_key,
-                base_url=self.base_url
-            )
-            print("✅ LLM 配置成功")
-        except ImportError:
-            print("⚠️  无法导入 LLM，使用默认配置")
-            self.llm = None
-        except Exception as e:
-            print(f"⚠️  LLM 配置失败，将使用备用方案: {e}")
-            self.llm = None
-
-    def _setup_agents(self):
-        """初始化 CrewAI Agents"""
-
-        # 准备 agent 配置参数
-        agent_config = {
-            'verbose': True,
-            'allow_delegation': False,
-            'llm': self.llm
-        }
-
-        # SQL 分析专家
-        self.analyzer = Agent(
-            role='SQL 性能分析专家',
-            goal='深入分析 SQL 语句，识别所有性能瓶颈和优化机会',
-            backstory="""你是一位拥有 15 年经验的数据库性能优化专家。
-            你精通 MySQL、PostgreSQL、Oracle 等主流数据库，
-            能够快速识别 SQL 语句中的性能问题，并给出专业的优化建议。
-            你的分析总是全面、准确、有理有据。""",
-            tools=[analyze_sql_tool],
-            **agent_config
-        )
-
-        # SQL 优化工程师
-        self.optimizer = Agent(
-            role='SQL 优化工程师',
-            goal='根据分析结果，生成优化的 SQL 语句和详细的优化方案',
-            backstory="""你是一位资深的 SQL 优化工程师，擅长将复杂的 SQL
-            语句重构为高性能的查询。你不仅能找出问题，还能提供可执行的
-            优化方案和最佳实践建议。你的优化方案总是兼顾性能和可读性。""",
-            tools=[generate_optimization_suggestions],
-            **agent_config
-        )
-
-        # 报告生成专家
-        self.reporter = Agent(
-            role='技术文档专家',
-            goal='生成清晰、专业的 SQL 优化报告',
-            backstory="""你是一位技术写作专家，擅长将复杂的技术内容
-            转化为易于理解的文档。你的报告结构清晰，重点突出，
-            包含完整的优化前后对比和具体的实施建议。""",
-            tools=[],  # 报告生成专家不需要工具
-            **agent_config
-        )
-    
-    def optimize_sql(self, sql_query: str) -> Dict[str, Any]:
-        """执行 SQL 优化流程"""
-        print("\n" + "="*80)
-        print("🚀 CrewAI SQL 优化流程启动")
-        print("="*80)
-
-        # 任务 1: 分析 SQL
-        analysis_task = Task(
-            description=f"""
-            分析以下 SQL 语句，识别所有性能问题:
-
-            ```sql
-            {sql_query}
-            ```
-
-            请使用 SQL 分析工具进行全面检查，包括:
-            1. 索引使用情况
-            2. 查询效率
-            3. 潜在的性能瓶颈
-            4. 可优化的部分
-
-            输出格式要求:
-            - 列出所有发现的问题
-            - 标注问题严重程度
-            - 说明问题影响
-            """,
-            agent=self.analyzer,
-            expected_output="详细的 SQL 分析报告，包含所有发现的性能问题"
-        )
-
-        # 任务 2: 生成优化方案
-        optimization_task = Task(
-            description=f"""
-            基于分析结果，为以下 SQL 生成优化方案:
-
-            ```sql
-            {sql_query}
-            ```
-
-            请使用优化建议生成器工具，提供:
-            1. 具体的优化建议
-            2. 优化后的 SQL 语句
-            3. 预期的性能提升
-            4. 实施注意事项
-
-            优化原则:
-            - 保持 SQL 语义不变
-            - 优先考虑性能提升
-            - 兼顾代码可读性
-            - 提供多种优化方案
-            """,
-            agent=self.optimizer,
-            expected_output="完整的优化方案，包含优化后的 SQL 和详细说明"
-        )
-
-        # 任务 3: 生成报告
-        report_task = Task(
-            description=f"""
-            整合分析和优化结果，生成最终报告。
-
-            报告应包含:
-            1. 原始 SQL 和优化后的 SQL 对比
-            2. 发现的问题列表
-            3. 优化措施详解
-            4. 预期性能提升
-            5. 实施建议
-
-            格式要求:
-            - 使用 JSON 格式输出
-            - 结构清晰，易于解析
-            - 包含所有关键信息
-
-            JSON 结构示例:
-            {{
-                "original_sql": "原始 SQL",
-                "optimized_sql": "优化后的 SQL",
-                "issues_found": ["问题1", "问题2"],
-                "optimizations_applied": ["优化1", "优化2"],
-                "performance_gain_estimate": "预估提升百分比",
-                "recommendations": ["建议1", "建议2"]
-            }}
-            """,
-            agent=self.reporter,
-            expected_output="JSON 格式的完整优化报告"
-        )
-
-        # 检查是否有有效的 LLM 配置
-        if not self.llm:
-            print("⚠️  LLM 未正确配置，直接使用备用优化逻辑")
-            return self._get_fallback_result(sql_query)
-
-        # 创建 Crew 并执行
-        crew = Crew(
-            agents=[self.analyzer, self.optimizer, self.reporter],
-            tasks=[analysis_task, optimization_task, report_task],
-            # agents=[self.analyzer, self.optimizer],
-            # tasks=[analysis_task, optimization_task],
-            process=Process.sequential,
-            verbose=True
-        )
-
-        try:
-            print("🚀 开始执行 CrewAI 任务...")
-            # 执行任务
-            result = crew.kickoff()
-            print(f"🎯 CrewAI 执行完成，结果类型: {type(result)}")
-
-            # 解析结果
-            result_str = str(result)
-            print(f"📄 结果字符串长度: {len(result_str)}")
-
-            # 尝试提取 JSON
-            json_start = result_str.find('{')
-            json_end = result_str.rfind('}') + 1
-
-            if json_start != -1 and json_end > json_start:
-                json_str = result_str[json_start:json_end]
-                print(f"🔍 提取的 JSON 长度: {len(json_str)}")
-                parsed_result = json.loads(json_str)
-                print("✅ JSON 解析成功")
-            else:
-                print("⚠️  未找到完整 JSON，使用备用解析")
-                parsed_result = self._parse_fallback_result(result_str, sql_query)
-
-        except Exception as e:
-            print(f"❌ CrewAI 执行或解析出错: {e}")
-            print(f"🔄 使用备用优化逻辑")
-            # 提供更详细的错误信息
-            if "choices" in str(e):
-                print("💡 这通常意味着 API 响应格式不正确或 API key 无效")
-            elif "timeout" in str(e).lower():
-                print("💡 这可能是网络超时问题")
-            elif "api" in str(e).lower():
-                print("💡 这可能是 API 认证问题")
-
-            parsed_result = self._get_fallback_result(sql_query)
-
-        # 确保基本字段存在
-        parsed_result = self._ensure_required_fields(parsed_result, sql_query)
-
-        # 添加元数据
-        parsed_result["timestamp"] = datetime.now().isoformat()
-        parsed_result["agent"] = "crewai_sql_optimizer"
-        parsed_result["full_output"] = result_str if 'result_str' in locals() else "Execution failed"
-
-        print("\n✅ CrewAI 优化完成")
-        return parsed_result
-    
-    def _simple_optimize(self, sql: str) -> str:
-        """简单的 SQL 优化（备用）"""
-        optimized = sql.strip()
-
-        if "SELECT *" in optimized.upper():
-            optimized = optimized.replace("SELECT *",
-                "SELECT id, name, email, created_at")
-
-        if "WHERE" not in optimized.upper() and "FROM" in optimized.upper():
-            parts = optimized.split("FROM")
-            if len(parts) > 1:
-                optimized = parts[0] + "FROM" + parts[1].rstrip(";") + \
-                    "\nWHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)"
-
-        return optimized
-
-    def _parse_fallback_result(self, result_str: str, sql_query: str) -> Dict[str, Any]:
-        """备用结果解析"""
-        # 尝试从文本中提取有用信息
-        issues = []
-        optimizations = []
-
-        # 使用我们的工具函数
-        try:
-            analysis_result = analyze_sql_tool(sql_query)
-            suggestions_result = generate_optimization_suggestions(sql_query)
-
-            if "发现以下问题:" in analysis_result:
-                issues = [line.strip() for line in analysis_result.split('\n')[1:] if line.strip()]
-
-            if "优化建议" in suggestions_result:
-                optimizations = [s.strip() for s in suggestions_result.split('优化建议') if s.strip() and len(s.strip()) > 10]
-
-        except Exception as e:
-            print(f"⚠️  备用分析出错: {e}")
-
-        return {
-            "original_sql": sql_query,
-            "optimized_sql": self._simple_optimize(sql_query),
-            "issues_found": issues[:5] if issues else ["需要详细分析"],
-            "optimizations_applied": optimizations[:3] if optimizations else ["基础优化"],
-            "performance_gain_estimate": "10-20%",
-            "recommendations": ["建议查看完整分析报告", "考虑添加索引", "优化查询条件"]
-        }
-
-    def _get_fallback_result(self, sql_query: str) -> Dict[str, Any]:
-        """获取备用结果"""
-        # 直接使用工具函数进行分析
-        try:
-            print("🔧 执行备用 SQL 分析...")
-
-            # 检查工具函数是否可调用
-            if callable(analyze_sql_tool):
-                analysis = analyze_sql_tool(sql_query)
-                print("✅ SQL 分析工具执行成功")
-            else:
-                analysis = "⚠️  SQL 分析工具不可用，使用内置逻辑"
-                print("⚠️  SQL 分析工具不可用，使用内置逻辑")
-
-            if callable(generate_optimization_suggestions):
-                suggestions = generate_optimization_suggestions(sql_query)
-                print("✅ 优化建议工具执行成功")
-            else:
-                suggestions = "⚠️  优化建议工具不可用，使用内置逻辑"
-                print("⚠️  优化建议工具不可用，使用内置逻辑")
-
-            issues = []
-            if "❌" in analysis or "⚠️" in analysis:
-                issues = [line.strip() for line in analysis.split('\n') if line.strip() and ('❌' in line or '⚠️' in line)]
-
-            optimizations = []
-            if "优化建议" in suggestions:
-                # 提取优化建议的关键词
-                opt_lines = [line.strip() for line in suggestions.split('\n') if line.strip()]
-                optimizations = [line for line in opt_lines if line.startswith('-') or line.startswith('•')]
-
-            # 如果工具函数不可用，使用内置逻辑
-            if not issues:
-                issues = self._analyze_sql_fallback(sql_query)
-            if not optimizations:
-                optimizations = self._get_suggestions_fallback(sql_query)
-
-        except Exception as e:
-            print(f"⚠️  工具函数执行出错: {e}")
-            print("🔄 使用内置分析逻辑")
-            issues = self._analyze_sql_fallback(sql_query)
-            optimizations = self._get_suggestions_fallback(sql_query)
-
-        return {
-            "original_sql": sql_query,
-            "optimized_sql": self._simple_optimize(sql_query),
-            "issues_found": issues[:5] if issues else ["检查 SELECT * 使用", "检查是否有 WHERE 子句"],
-            "optimizations_applied": optimizations[:3] if optimizations else ["基础优化"],
-            "performance_gain_estimate": "5-15%",
-            "recommendations": ["使用 EXPLAIN 分析执行计划", "添加合适的索引", "避免使用 SELECT *"]
-        }
-
-    def _analyze_sql_fallback(self, sql_query: str) -> List[str]:
-        """内置 SQL 分析逻辑"""
-        issues = []
-        sql_lower = sql_query.lower()
-
-        if "select *" in sql_lower:
-            issues.append("❌ 使用 SELECT * 会检索所有列")
-        if "where" not in sql_lower and "from" in sql_lower:
-            issues.append("❌ 缺少 WHERE 子句可能导致全表扫描")
-        if "like" in sql_lower and "'%" in sql_lower:
-            issues.append("❌ LIKE 前置通配符无法使用索引")
-
-        return issues if issues else ["✅ 未发现明显的性能问题"]
-
-    def _get_suggestions_fallback(self, sql_query: str) -> List[str]:
-        """内置优化建议逻辑"""
-        suggestions = []
-        sql_lower = sql_query.lower()
-
-        if "select *" in sql_lower:
-            suggestions.append("- 明确指定需要的列名而不是使用 SELECT *")
-        if "where" not in sql_lower and "from" in sql_lower:
-            suggestions.append("- 添加合适的 WHERE 条件来过滤数据")
-        if "like" in sql_lower and "'%" in sql_lower:
-            suggestions.append("- 避免 LIKE 前置通配符，考虑使用全文搜索")
-
-        return suggestions if suggestions else ["- 当前 SQL 已经较为优化"]
-
-    def _ensure_required_fields(self, result: Dict[str, Any], sql_query: str) -> Dict[str, Any]:
-        """确保结果包含所有必需字段"""
-        required_fields = {
-            "original_sql": sql_query,
-            "optimized_sql": result.get("optimized_sql", self._simple_optimize(sql_query)),
-            "issues_found": result.get("issues_found", []),
-            "optimizations_applied": result.get("optimizations_applied", []),
-            "performance_gain_estimate": result.get("performance_gain_estimate", "10-30%"),
-            "recommendations": result.get("recommendations", [])
-        }
-
-        # 确保列表字段不为空
-        if not required_fields["issues_found"]:
-            required_fields["issues_found"] = ["需要详细分析"]
-        if not required_fields["optimizations_applied"]:
-            required_fields["optimizations_applied"] = ["基础优化"]
-        if not required_fields["recommendations"]:
-            required_fields["recommendations"] = ["查看完整分析报告"]
-
-        # 合并额外字段
-        final_result = {**required_fields, **result}
-        return final_result
-
-
-# ============================================================================
-# 2. AutoGen 0.4+ SQL 审核 Agent (完整实现)
-# ============================================================================
-
-class SQLReviewerAutoGen:
-    """AutoGen 0.7+ SQL 审核系统"""
-    
-    def __init__(self, openai_api_key: Optional[str] = None):
-        self.api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
-        self.base_url = os.getenv("OPENAI_BASE_URL")
-        if not self.api_key:
-            raise ValueError("需要设置 OPENAI_API_KEY 环境变量")
-        
-        self._setup_agents()
-    
-    def _setup_agents(self):
-        """初始化 AutoGen 0.7+ Agents"""
-        print("🤖 初始化 AutoGen 0.7+ Agents...")
-
-        try:
-            # 创建 OpenAI 客户端，添加更多配置
-            self.model_client = OpenAIChatCompletionClient(
-                model="mistral:latest",  # 使用Ollama服务器上的实际模型名称
-                api_key=self.api_key,
-                base_url=self.base_url,
-                # 添加超时和重试配置（如果支持的参数）
-                timeout=30,
-            )
-
-            # 创建 SQL 审核 Agent
-            self.reviewer_agent = AssistantAgent(
-                name="SQL_Reviewer",
-                model_client=self.model_client,
-                description="资深的 SQL 审核专家，负责审核优化后的 SQL 语句",
-                system_message="""你是一位资深的 SQL 审核专家，负责审核优化后的 SQL 语句。
-
-你的审核维度包括:
-1. **语法正确性**: 检查 SQL 语法是否正确
-2. **安全性**: 检查是否存在 SQL 注入风险、危险操作
-3. **性能**: 评估查询性能和优化效果
-4. **最佳实践**: 检查是否符合 SQL 编码规范
-
-审核标准:
-- 语法错误: 不通过
-- 安全风险: 不通过
-- 性能问题: 根据严重程度决定
-- 规范问题: 给出建议但可以通过
-
-请给出明确的审核结论: APPROVED (通过) 或 REJECTED (拒绝)
-并提供详细的审核理由和改进建议。
-
-输出格式要求 JSON:
-{
-    "approved": true/false,
-    "score": 0-100,
-    "syntax_check": {"passed": true/false, "issues": []},
-    "security_check": {"passed": true/false, "issues": []},
-    "performance_check": {"passed": true/false, "score": 0-100},
-    "best_practices": {"score": 0-100, "suggestions": []},
-    "summary": "审核总结",
-    "recommendations": ["建议1", "建议2"]
-}
-
-只返回 JSON，不要其他文字。"""
-            )
-
-            print("✅ AutoGen Agents 初始化成功")
-
-        except Exception as e:
-            print(f"❌ AutoGen Agents 初始化失败: {e}")
-            self.reviewer_agent = None
-            self.model_client = None
-    
-    async def _collect_stream_messages(self, team, task: str, timeout: int = 30) -> list:
-        """异步收集流式消息"""
-        import sys
-        messages = []
-        
-        try:
-            async with asyncio.timeout(timeout):
-                stream = team.run_stream(task=task)
-                message_count = 0
-                
-                async for message in stream:
-                    messages.append(message)
-                    message_count += 1
-                    
-                    # 限制消息数量
-                    if message_count >= 10:
-                        print(f"📝 已达到最大消息数 ({message_count})，停止收集")
-                        break
-                    
-                    # 显示进度
-                    if message_count <= 3:
-                        # 调试消息结构
-                        print(f"🔍 消息 {message_count} 类型: {type(message)}")
-                        attrs = [attr for attr in dir(message) if not attr.startswith('_')][:10]  # 限制显示的属性数量
-                        print(f"🔍 消息 {message_count} 属性: {attrs}")
-
-                        # 尝试提取内容预览
-                        content_preview = "N/A"
-                        if hasattr(message, 'content'):
-                            content_preview = str(message.content)[:100]
-                        elif hasattr(message, 'text'):
-                            content_preview = str(message.text)[:100]
-                        elif hasattr(message, 'message'):
-                            content_preview = str(message.message)[:100]
-                        else:
-                            content_preview = str(message)[:100]
-
-                        print(f"📝 收到消息 {message_count}: {content_preview}...")
-           
-            
-            print(f"✅ 流式收集完成，共 {len(messages)} 条消息")
-            
-        except asyncio.TimeoutError:
-            print(f"⏰ 流式收集超时 ({timeout}秒)，已收集 {len(messages)} 条消息")
-        except Exception as e:
-            print(f"❌ 流式收集出错: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        return messages
-    
-    async def review_optimization(self, optimization_result: Dict[str, Any]) -> Dict[str, Any]:
-        """执行 SQL 审核流程（异步）"""
-        print("\n" + "="*80)
-        print("🔍 SQL 审核流程启动")
-        print("="*80)
-
-        original_sql = optimization_result.get("original_sql", "")
-        optimized_sql = optimization_result.get("optimized_sql", "")
-        issues = optimization_result.get("issues_found", [])
-        optimizations = optimization_result.get("optimizations_applied", [])
-
-        # 构建审核请求
-        review_request = f"""
-请审核以下 SQL 优化结果:
-
-**原始 SQL:**
-```sql
-{original_sql}
-```
-
-**优化后的 SQL:**
-```sql
-{optimized_sql}
-```
-
-**发现的问题:**
-{json.dumps(issues, ensure_ascii=False, indent=2)}
-
-**应用的优化:**
-{json.dumps(optimizations, ensure_ascii=False, indent=2)}
-
-请进行全面审核，并以 JSON 格式返回审核结果。
-重点关注:
-1. 优化后的 SQL 是否保持了原有语义
-2. 是否存在语法错误
-3. 是否存在安全风险
-4. 性能是否真正得到提升
-5. 是否符合 SQL 最佳实践
-
-请直接返回 JSON，不要有其他文字。
-"""
-
-        review_result = None
-
-        try:
-            # 使用 RoundRobinGroupChat 进行对话
-            termination = TextMentionTermination("TERMINATE")
-            max_message_termination = MaxMessageTermination(2)
-            # 使用`|` 运算符组合终止条件，在满足任一条件时停止任务
-            termination = termination | max_message_termination
-            team = RoundRobinGroupChat(
-                participants=[self.reviewer_agent],
-                termination_condition=termination,
-                max_turns=None
-            )
-
-            # 使用修复后的异步流式收集
-            messages = await self._collect_stream_messages(team, review_request, timeout=10)
-
-            if messages:
-                # 获取最后一条消息 - 修复：处理 TaskResult
-                last_message = messages[-1]
-                # 提取内容
-                content = None
-                
-                # 1. 检查是否是 TaskResult
-                if hasattr(last_message, 'messages') and isinstance(last_message.messages, list):
-                    print(f"📦 检测到 TaskResult，包含 {len(last_message.messages)} 条内部消息")
-                    
-                    # 从 TaskResult 中获取实际的消息列表
-                    internal_messages = last_message.messages
-                    
-                    # 遍历内部消息，找到包含 JSON 的消息
-                    for msg in reversed(internal_messages):  # 从后往前找
-                        if hasattr(msg, 'content'):
-                            msg_content = str(msg.content)
-                            
-                            # 检查是否包含 JSON
-                            if '{' in msg_content and '}' in msg_content:
-                                content = msg_content
-                                print(f"✅ 从 TaskResult 内部消息中提取到内容: {content[:100]}...")
-                                break
-                
-                # 2. 如果不是 TaskResult，直接提取 content
-                if content is None:
-                    if hasattr(last_message, 'content'):
-                        content = last_message.content
-                        print(f"📄 通过 content 属性获取内容: {str(content)[:100]}...")
-                    elif hasattr(last_message, 'text'):
-                        content = last_message.text
-                        print(f"📄 通过 text 属性获取内容: {str(content)[:100]}...")
-                    elif hasattr(last_message, 'message'):
-                        content = last_message.message
-                        print(f"📄 通过 message 属性获取内容: {str(content)[:100]}...")
-                    else:
-                        # 尝试转换为字符串
-                        content = str(last_message)
-                        print(f"📄 通过 str() 获取内容: {content[:100]}...")
-
-                if content and len(str(content).strip()) > 0:
-                    review_result = self._parse_review_response(str(content), optimized_sql)
-
-        except Exception as e:
-            print(f"❌ AutoGen 审核出错: {e}")
-            print("🔄 切换到备用审核逻辑")
-            import traceback
-            traceback.print_exc()
-            review_result = self._fallback_review(optimized_sql)
-
-        # 如果审核结果为空，使用备用逻辑
-        if review_result is None:
-            print("🔄 审核结果为空，使用备用审核逻辑")
-            review_result = self._fallback_review(optimized_sql)
-
-        # 添加元数据
-        review_result["timestamp"] = datetime.now().isoformat()
-        review_result["agent"] = "autogen_sql_reviewer"
-        review_result["comparison"] = self._compare_sqls(original_sql, optimized_sql)
-
-        print(f"\n✅ SQL 审核完成")
-        print(f"   状态: {'✅ 通过' if review_result.get('approved') else '❌ 未通过'}")
-        print(f"   评分: {review_result.get('score', 0)}/100")
-
-        return review_result
-    
-    def _parse_review_response(self, content: str, optimized_sql: str) -> Dict[str, Any]:
-        """解析 AutoGen 审核响应"""
-        try:
-            # 尝试提取第一个完整的 JSON 对象
-            json_start = content.find('{')
-            
-            # 从第一个 { 开始查找匹配的 }
-            brace_count = 0
-            json_end = -1
-            
-            for i in range(json_start, len(content)):
-                if content[i] == '{':
-                    brace_count += 1
-                elif content[i] == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        json_end = i + 1
-                        break
-            # 提取 JSON 字符串
-            json_str = content[json_start:json_end]
-            # 解析 JSON
-            review_result = json.loads(json_str)
-            print(f"✅ JSON 解析成功")
-            
-            # 验证必需字段
-            required_fields = ['approved', 'score']
-            missing_fields = [f for f in required_fields if f not in review_result]
-            
-            if missing_fields:
-                print(f"⚠️  JSON 缺少必需字段: {missing_fields}")
-                return self._fallback_review(optimized_sql)
-            
-            return review_result
-        
-        except json.JSONDecodeError as e:
-            print(f"⚠️  JSON 解析失败: {e}")
-            print(f"🔍 尝试解析的内容: {content[:500]}...")
-            return self._fallback_review(optimized_sql)
-        except Exception as e:
-            print(f"⚠️  解析响应时出错: {e}")
-            return self._fallback_review(optimized_sql)
-
-    def _fallback_review(self, sql: str) -> Dict[str, Any]:
-        """备用审核逻辑"""
-        print("🔄 使用备用审核逻辑...")
-        
-        score = 100
-        issues = []
-        
-        sql_upper = sql.upper()
-        
-        # 安全检查
-        if "DROP" in sql_upper or "TRUNCATE" in sql_upper:
-            score -= 50
-            issues.append("包含危险操作 (DROP/TRUNCATE)")
-        
-        if "DELETE" in sql_upper and "WHERE" not in sql_upper:
-            score -= 40
-            issues.append("DELETE 语句缺少 WHERE 条件")
-        
-        # 性能检查
-        if "SELECT *" in sql:
-            score -= 10
-            issues.append("使用 SELECT *")
-        
-        if "WHERE" not in sql_upper and "FROM" in sql_upper:
-            score -= 15
-            issues.append("缺少 WHERE 子句")
-        
-        if sql.count("JOIN") > 3:
-            score -= 10
-            issues.append(f"过多的 JOIN ({sql.count('JOIN')} 个)")
-        
-        # 计算最终评分
-        score = max(0, score)
-        
-        return {
-            "approved": score >= 70,
-            "score": score,
-            "syntax_check": {
-                "passed": True,
-                "issues": []
-            },
-            "security_check": {
-                "passed": score >= 70,
-                "issues": [i for i in issues if "危险" in i or "DELETE" in i]
-            },
-            "performance_check": {
-                "passed": score >= 70,
-                "score": score
-            },
-            "best_practices": {
-                "score": score,
-                "suggestions": issues
-            },
-            "summary": f"备用审核完成，评分 {score}/100",
-            "recommendations": issues if issues else ["SQL 质量良好"]
-        }
-    
-    def _compare_sqls(self, original: str, optimized: str) -> Dict[str, Any]:
-        """对比两个 SQL"""
-        return {
-            "length_change": f"{len(original)} → {len(optimized)} 字符",
-            "complexity": "简化" if len(optimized) < len(original) else "优化",
-            "readability": "提升" if "\n" in optimized and "\n" not in original else "保持"
-        }
-
-
-# ============================================================================
-# 3. A2A Framework 协议实现
-# ============================================================================
-
-class A2AMessage:
-    """A2A 协议消息"""
-    
-    def __init__(self, sender: str, receiver: str, content: Dict[str, Any], 
-                 message_type: str = "request"):
-        self.sender = sender
-        self.receiver = receiver
-        self.content = content
-        self.message_type = message_type
-        self.timestamp = datetime.now().isoformat()
-        self.message_id = f"{sender}_{int(datetime.now().timestamp() * 1000)}"
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.message_id,
-            "sender": self.sender,
-            "receiver": self.receiver,
-            "type": self.message_type,
-            "content": self.content,
-            "timestamp": self.timestamp,
-            "protocol": "A2A-v1.0"
-        }
-
-
-class A2AOrchestrator:
-    """A2A 框架编排器"""
-    
-    def __init__(self):
-        self.agents = {}
-        self.message_history = []
-        
-    def register_agent(self, agent_id: str, agent: Any):
-        """注册 Agent"""
-        self.agents[agent_id] = agent
-        print(f"✅ [A2A] 注册 Agent: {agent_id}")
-    
-    async def send_message(self, message: A2AMessage) -> Dict[str, Any]:
-        """发送 A2A 消息"""
-        msg_dict = message.to_dict()
-        self.message_history.append(msg_dict)
-        
-        print(f"\n📨 [A2A Protocol] 消息传递")
-        print(f"   From: {message.sender}")
-        print(f"   To: {message.receiver}")
-        print(f"   Type: {message.message_type}")
-        print(f"   Message ID: {message.message_id}")
-        
-        await asyncio.sleep(0.2)
-        
-        return msg_dict
-    
-    async def optimize_and_review_sql(self, sql_query: str) -> Dict[str, Any]:
-        """完整的 SQL 优化和审核流程"""
-        
-        print("\n" + "🌟"*40)
-        print("         A2A SQL 优化审核系统")
-        print("🌟"*40)
-        
-        # 步骤 1: 用户 -> CrewAI Optimizer
-        optimizer = self.agents.get("crewai_sql_optimizer")
-        if not optimizer:
-            raise ValueError("CrewAI SQL Optimizer Agent 未注册")
-        
-        optimize_msg = A2AMessage(
-            sender="user",
-            receiver="crewai_sql_optimizer",
-            content={"sql_query": sql_query, "task": "optimize"},
-            message_type="optimization_request"
-        )
-        await self.send_message(optimize_msg)
-        
-        # CrewAI 执行优化（同步）
-        optimization_result = optimizer.optimize_sql(sql_query)
-        
-        # 步骤 2: CrewAI Optimizer -> AutoGen Reviewer
-        reviewer = self.agents.get("autogen_sql_reviewer")
-        if not reviewer:
-            raise ValueError("AutoGen SQL Reviewer Agent 未注册")
-        
-        review_msg = A2AMessage(
-            sender="crewai_sql_optimizer",
-            receiver="autogen_sql_reviewer",
-            content=optimization_result,
-            message_type="review_request"
-        )
-        await self.send_message(review_msg)
-        
-        # AutoGen 执行审核（异步）
-        review_result = await reviewer.review_optimization(optimization_result)
-        
-        # 步骤 3: AutoGen Reviewer -> User
-        final_msg = A2AMessage(
-            sender="autogen_sql_reviewer",
-            receiver="user",
-            content={
-                "optimization": optimization_result,
-                "review": review_result,
-                "final_status": "APPROVED" if review_result.get("approved") else "REJECTED",
-                "workflow_complete": True
-            },
-            message_type="final_response"
-        )
-        await self.send_message(final_msg)
-        print("         流程完成")
-        return final_msg.to_dict()
-
-
-# ============================================================================
-# 4. 主程序
-# ============================================================================
-
-async def main():
-    """主程序"""
-    
-    # 检查 API Key
-    if not os.getenv("OPENAI_API_KEY"):
-        print("❌ 错误: 未设置 OPENAI_API_KEY 环境变量")
-        print("请创建 .env 文件并添加: OPENAI_API_KEY=your_key_here")
-        return
-    
+import uuid
+import hmac
+import hashlib
+import httpx
+import os
+import re
+import subprocess
+import tempfile
+import shutil
+from pathlib import Path
+
+# 导入单 Agent SQL 优化组件
+from optimize_sql import SQLOptimizerSingle
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 创建 FastAPI 应用
+app = FastAPI(
+    title="SQL 优化审核系统 API",
+    description="基于单 Agent 架构的 SQL 优化和审核服务",
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# 添加 CORS 中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 在生产环境中应该设置具体的域名
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 全局变量存储 SQL 优化器实例
+sql_optimizer_instance = None
+
+# Pydantic 模型定义
+class SQLOptimizationRequest(BaseModel):
+    """SQL 优化请求模型"""
+    sql_query: str = Field(..., description="要优化的 SQL 查询语句", min_length=10, max_length=10000)
+    optimization_level: Optional[str] = Field("standard", description="优化级别", pattern="^(basic|standard|aggressive)$")
+    include_review: Optional[bool] = Field(True, description="是否包含审核步骤")
+
+class SQLOptimizationResponse(BaseModel):
+    """SQL 优化响应模型"""
+    request_id: str
+    status: str
+    message: str
+    timestamp: str
+    optimization_result: Optional[Dict[str, Any]] = None
+    review_result: Optional[Dict[str, Any]] = None
+    final_status: Optional[str] = None
+    processing_time: Optional[float] = None
+
+class TaskStatus(BaseModel):
+    """任务状态模型"""
+    task_id: str
+    status: str
+    message: str
+    progress: Optional[float] = None
+    created_at: str
+    updated_at: str
+    result: Optional[Dict[str, Any]] = None
+
+class GitHubWebhookRequest(BaseModel):
+    """GitHub Webhook 请求模型"""
+    ref: Optional[str] = None
+    repository: Optional[Dict[str, Any]] = None
+    commits: Optional[List[Dict[str, Any]]] = None
+    pusher: Optional[Dict[str, Any]] = None
+    head_commit: Optional[Dict[str, Any]] = None
+    sender: Optional[Dict[str, Any]] = None
+
+class SQLReviewResult(BaseModel):
+    """SQL 审核结果模型"""
+    file_path: str
+    status: str
+    issues: List[str]
+    optimizations: Optional[List[str]] = None
+    optimized_sql: Optional[str] = None
+    severity: str  # 'low', 'medium', 'high', 'critical'
+
+class WebhookResponse(BaseModel):
+    """Webhook 响应模型"""
+    webhook_id: str
+    status: str
+    message: str
+    timestamp: str
+    repository: Optional[str] = None
+    commit: Optional[str] = None
+    sql_files_found: int
+    reviews: Optional[List[SQLReviewResult]] = None
+
+# 内存存储任务状态（生产环境应使用 Redis）
+task_store: Dict[str, TaskStatus] = {}
+
+# GitHub webhook 配置（从环境变量读取）
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+# SSH 配置
+GITHUB_SSH_KEY_PATH = os.getenv("GITHUB_SSH_KEY_PATH", "")  # SSH 私钥文件路径
+GITHUB_SSH_KEY_CONTENT = os.getenv("GITHUB_SSH_KEY_CONTENT", "")  # SSH 私钥内容（可选，优先使用文件路径）
+GITHUB_KNOWN_HOSTS_PATH = os.getenv("GITHUB_KNOWN_HOSTS_PATH", "/tmp/known_hosts")  # SSH known_hosts 文件路径
+GITHUB_USER = os.getenv("GITHUB_USER", "git")  # Git 用户名
+GITHUB_EMAIL = os.getenv("GITHUB_EMAIL", "")  # Git 邮箱（用于 commit 签名）
+
+# 存储 webhook 处理历史
+webhook_history: Dict[str, WebhookResponse] = {}
+
+# SSH 配置全局变量
+ssh_configured = False
+
+async def setup_ssh_config():
+    """设置 SSH 配置"""
+    global ssh_configured
     try:
-        # 初始化 A2A 编排器
-        orchestrator = A2AOrchestrator()
-        
-        # 创建 Agents
-        print("\n🔧 初始化 Agents...")
-        sql_optimizer = SQLOptimizerCrew()
-        sql_reviewer = SQLReviewerAutoGen()
-        
-        # 注册到 A2A
-        orchestrator.register_agent("crewai_sql_optimizer", sql_optimizer)
-        orchestrator.register_agent("autogen_sql_reviewer", sql_reviewer)
-        
-        # 测试 SQL
-        test_sql = """
-        INSERT INTO channeldiscount_mstradedailyanalyze_sjmy_tmp(TaskDate, ServerId, ChannelId, TotalLogNumber, AlarmLogNumber, TotalLogPrice, AlarmLogPrice,  BaseAlarmNumberPercent, BaseAlarmPricePercent)
-                SELECT 251110, t01.ServerId, t03.ChannelId, COUNT(1) as TotalLogNumber, sum(CASE WHEN t01.AlarmStatus!=0 then 1 else 0 end) as AlarmLogNumber,
-                SUM(t01.TradeMoShi) as TotalLogPrice, sum(CASE WHEN t01.AlarmStatus!=0 then t01.TradeMoShi else 0 end) as AlarmLogPrice, t02.AlarmNumberPercent, t02.AlarmPricePercent
-                FROM channeldiscount_mstraderatioanalyze_sjmy t01 
-inner join channeldiscount_serverchannel t03 on t03.GameId = 421 and t03.ServerId=t01.ServerId
-left join channeldiscount_mstradedailyconfig t02 on t02.GameId = 421 and t02.AlarmType=2
-                WHERE left(t01.TradeTime, 6) = 251110 AND t01.ServerId != 0
-                GROUP by ServerId;
-        """
-        
-        print(f"\n📝 原始 SQL:\n{test_sql}")
-        
-        # 执行完整流程
-        result = await orchestrator.optimize_and_review_sql(test_sql)
-        
-        # 打印结果
-        print_final_report(result, orchestrator.message_history)
-        
+        # 检查 SSH 密钥配置
+        ssh_key_path = GITHUB_SSH_KEY_PATH or ""
+        ssh_key_content = GITHUB_SSH_KEY_CONTENT or ""
+
+        if not ssh_key_path and not ssh_key_content:
+            logger.warning("❌ 未配置 GitHub SSH 密钥，请设置 GITHUB_SSH_KEY_PATH 或 GITHUB_SSH_KEY_CONTENT 环境变量")
+            return False
+
+        ssh_configured = True
+        logger.info("✅ SSH 配置初始化成功")
+        return True
+
     except Exception as e:
-        print(f"\n❌ 错误: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"❌ SSH 配置初始化失败: {e}")
+        ssh_configured = False
+        return False
 
+# 启动时初始化
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时初始化单 Agent SQL 优化器和 SSH 配置"""
+    global sql_optimizer_instance
+    try:
+        # 初始化 SSH 配置
+        await setup_ssh_config()
 
-def print_final_report(result: Dict, message_history: List):
-    """打印最终报告"""
-    
-    content = result["content"]
-    opt = content["optimization"]
-    rev = content["review"]
-    
-    print("                  最终报告")
-    print(f"\n{'='*80}")
-    print("状态信息")
-    print(f"{'='*80}")
-    print(f"最终状态: {content['final_status']}")
-    print(f"审核评分: {rev.get('score', 'N/A')}/100")
-    print(f"是否通过: {'✅ 是' if rev.get('approved') else '❌ 否'}")
-    
-    print(f"\n{'='*80}")
-    print("优化结果")
-    print(f"{'='*80}")
-    print(f"\n原始 SQL:\n{opt['original_sql']}")
-    print(f"\n优化后的 SQL:\n{opt['optimized_sql']}")
-    
-    if opt.get('issues_found'):
-        print(f"\n发现的问题 ({len(opt['issues_found'])} 个):")
-        for i, issue in enumerate(opt['issues_found'][:5], 1):
-            print(f"  {i}. {issue}")
-    
-    if rev.get('recommendations'):
-        print(f"\n改进建议:")
-        for i, rec in enumerate(rev['recommendations'][:5], 1):
-            print(f"  {i}. {rec}")
-    
-    print(f"\n{'='*80}")
-    print("A2A 消息历史")
-    print(f"{'='*80}")
-    print(f"总消息数: {len(message_history)}")
-    for i, msg in enumerate(message_history, 1):
-        print(f"\n  [{i}] {msg['sender']} → {msg['receiver']}")
-        print(f"      类型: {msg['type']}")
-        print(f"      时间: {msg['timestamp']}")
+        # 初始化单 Agent SQL 优化器
+        logger.info("正在初始化单 Agent SQL 优化器...")
+        sql_optimizer_instance = SQLOptimizerSingle()
+        logger.info("✅ 单 Agent SQL 优化器初始化成功")
+    except Exception as e:
+        logger.error(f"❌ 单 Agent SQL 优化器初始化失败: {e}")
+        sql_optimizer_instance = None
 
+@app.get("/")
+async def root():
+    """根路径"""
+    return {
+        "service": "SQL 优化审核系统 API (单 Agent 架构)",
+        "version": "2.0.0",
+        "status": "running",
+        "architecture": "single_agent",
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": {
+            "optimize_sql": "/api/optimize",
+            "task_status": "/api/task/{task_id}",
+            "health": "/api/health",
+            "docs": "/docs"
+        }
+    }
 
+@app.get("/api/health")
+async def health_check():
+    """健康检查"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "sql_optimizer": "initialized" if sql_optimizer_instance else "not_initialized",
+        "architecture": "single_agent",
+        "ssh_configured": ssh_configured,
+        "github_auth_method": get_github_auth_method()
+    }
+
+def get_github_auth_method() -> str:
+    """获取 GitHub 认证方法"""
+    if os.getenv("GITHUB_TOKEN"):
+        return "token"
+    elif ssh_configured:
+        return "ssh"
+    else:
+        return "not_configured"
+
+@app.post("/api/optimize", response_model=SQLOptimizationResponse)
+async def optimize_sql_endpoint(request: SQLOptimizationRequest, background_tasks: BackgroundTasks):
+    """
+    优化 SQL 查询 (单 Agent 架构)
+
+    - **sql_query**: 要优化的 SQL 语句
+    - **optimization_level**: 优化级别 (basic/standard/aggressive) - 当前版本忽略，使用统一优化策略
+    - **include_review**: 是否包含审核步骤 - 当前版本单 Agent 已包含综合分析
+    """
+    if not sql_optimizer_instance:
+        raise HTTPException(
+            status_code=503,
+            detail="SQL 优化器未初始化，服务暂时不可用"
+        )
+
+    # 生成请求 ID
+    request_id = str(uuid.uuid4())
+    start_time = datetime.now()
+
+    try:
+        logger.info(f"收到 SQL 优化请求: {request_id}")
+
+        # 单 Agent 执行完整优化分析
+        optimization_result = sql_optimizer_instance.optimize_sql(request.sql_query)
+
+        # 单 Agent 已经包含完整的分析和优化，无需额外的审核步骤
+        review_result = None
+        final_status = "OPTIMIZED_BY_SINGLE_AGENT"
+
+        # 计算处理时间
+        processing_time = (datetime.now() - start_time).total_seconds()
+
+        response = SQLOptimizationResponse(
+            request_id=request_id,
+            status="success",
+            message="SQL 优化完成 (单 Agent 综合分析)",
+            timestamp=datetime.now().isoformat(),
+            optimization_result=optimization_result,
+            review_result=review_result,
+            final_status=final_status,
+            processing_time=processing_time
+        )
+
+        logger.info(f"SQL 优化完成: {request_id}, 耗时: {processing_time:.2f}s")
+        return response
+
+    except Exception as e:
+        logger.error(f"SQL 优化失败: {request_id}, 错误: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"SQL 优化失败: {str(e)}"
+        )
+
+@app.post("/api/optimize-async")
+async def optimize_sql_async(request: SQLOptimizationRequest, background_tasks: BackgroundTasks):
+    """
+    异步优化 SQL 查询（适用于长时间运行的优化任务）- 单 Agent 架构
+
+    返回任务 ID，可以通过 /api/task/{task_id} 查询状态
+    """
+    if not sql_optimizer_instance:
+        raise HTTPException(
+            status_code=503,
+            detail="SQL 优化器未初始化，服务暂时不可用"
+        )
+
+    # 生成任务 ID
+    task_id = str(uuid.uuid4())
+
+    # 创建任务状态
+    task_status = TaskStatus(
+        task_id=task_id,
+        status="pending",
+        message="任务已提交，等待单 Agent 处理",
+        progress=0.0,
+        created_at=datetime.now().isoformat(),
+        updated_at=datetime.now().isoformat()
+    )
+    task_store[task_id] = task_status
+
+    # 添加后台任务
+    background_tasks.add_task(process_optimization_task_single_agent, task_id, request)
+
+    return {
+        "task_id": task_id,
+        "status": "submitted",
+        "message": "优化任务已提交 (单 Agent 处理)",
+        "timestamp": datetime.now().isoformat()
+    }
+
+async def process_optimization_task_single_agent(task_id: str, request: SQLOptimizationRequest):
+    """后台处理优化任务 - 单 Agent 架构"""
+    try:
+        # 更新状态为处理中
+        task_status = task_store[task_id]
+        task_status.status = "processing"
+        task_status.message = "单 Agent 正在执行 SQL 优化分析..."
+        task_status.progress = 50.0
+        task_status.updated_at = datetime.now().isoformat()
+
+        # 单 Agent 执行完整优化分析
+        optimization_result = sql_optimizer_instance.optimize_sql(request.sql_query)
+
+        # 更新为完成状态
+        task_status.status = "completed"
+        task_status.message = "单 Agent 优化分析完成"
+        task_status.progress = 100.0
+        task_status.updated_at = datetime.now().isoformat()
+        task_status.result = {
+            "optimization": optimization_result,
+            "review": None,  # 单 Agent 已包含综合分析，无需单独审核
+            "final_status": "OPTIMIZED_BY_SINGLE_AGENT"
+        }
+
+    except Exception as e:
+        logger.error(f"单 Agent 后台任务失败: {task_id}, 错误: {str(e)}")
+        # 更新为失败状态
+        task_status = task_store[task_id]
+        task_status.status = "failed"
+        task_status.message = f"单 Agent 任务失败: {str(e)}"
+        task_status.updated_at = datetime.now().isoformat()
+
+@app.get("/api/task/{task_id}", response_model=TaskStatus)
+async def get_task_status(task_id: str):
+    """获取任务状态"""
+    if task_id not in task_store:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    return task_store[task_id]
+
+@app.get("/api/tasks")
+async def list_tasks():
+    """列出所有任务"""
+    return {
+        "tasks": list(task_store.values()),
+        "total": len(task_store)
+    }
+
+@app.delete("/api/task/{task_id}")
+async def delete_task(task_id: str):
+    """删除任务"""
+    if task_id not in task_store:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    del task_store[task_id]
+    return {"message": "任务已删除"}
+
+# ============================================================================
+# GitLab Webhook 相关功能
+# ============================================================================
+
+def verify_gitlab_signature(payload_body: bytes, signature_header: str, token_header: str = None) -> bool:
+    """验证 GitLab webhook 签名"""
+    if not GITHUB_WEBHOOK_SECRET:  # 重用相同的环境变量，但用于 GitLab
+        logger.warning("⚠️ 未设置 GITHUB_WEBHOOK_SECRET，跳过签名验证 (仅用于测试环境)")
+        logger.info("💡 生产环境请设置 GITHUB_WEBHOOK_SECRET 环境变量以确保安全性")
+        return True
+
+    try:
+        # GitLab 支持多种验证方式
+        # 1. Token 验证 (推荐)
+        if token_header:
+            expected_token = GITHUB_WEBHOOK_SECRET
+            if token_header == expected_token:
+                logger.info("✅ GitLab Token 验证成功")
+                return True
+            else:
+                logger.error("❌ GitLab Token 验证失败")
+                logger.error(f"Expected: {expected_token}")
+                logger.error(f"Received: {token_header}")
+                return False
+
+        # 2. X-Gitlab-Token header 验证
+        gitlab_token_header = None  # 需要从请求头中获取
+
+        # 3. Signature 验证 (如果使用 secret)
+        if signature_header:
+            # GitLab 的签名格式可能是: sha256=xxxxx
+            if signature_header.startswith('sha256='):
+                hash_algorithm, gitlab_signature = signature_header.split('=', 1)
+
+                if hash_algorithm == 'sha256':
+                    # 计算预期的签名
+                    mac = hmac.new(
+                        GITHUB_WEBHOOK_SECRET.encode('utf-8'),
+                        msg=payload_body,
+                        digestmod=hashlib.sha256
+                    )
+                    expected_signature = mac.hexdigest()
+
+                    # 使用恒定时间比较防止时序攻击
+                    is_valid = hmac.compare_digest(expected_signature, gitlab_signature)
+
+                    if not is_valid:
+                        logger.error("❌ GitLab Webhook 签名验证失败")
+                        logger.error(f"Expected: sha256={expected_signature}")
+                        logger.error(f"Received: {signature_header}")
+                    else:
+                        logger.info("✅ GitLab Webhook 签名验证成功")
+
+                    return is_valid
+                else:
+                    logger.error(f"❌ 不支持的哈希算法: {hash_algorithm}")
+                    return False
+            else:
+                logger.error("❌ GitLab 签名格式错误，应以 'sha256=' 开头")
+                return False
+
+        # 如果没有提供任何验证信息
+        logger.warning("⚠️ 未提供 GitLab webhook 验证信息")
+        return True  # 测试环境下允许通过
+
+    except Exception as e:
+        logger.error(f"❌ GitLab 签名验证过程中发生错误: {e}")
+        return False
+
+def extract_sql_files(commits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """从提交中提取 SQL 文件 (支持 GitLab webhook 格式)"""
+    sql_files = []
+
+    logger.info(f"开始处理 {len(commits)} 个提交")
+
+    for commit in commits:
+        # 检查 commit 是否为字典类型
+        if not isinstance(commit, dict):
+            logger.error(f"Commit 不是字典类型: {type(commit)}")
+            continue
+
+        commit_id = commit.get('id', '')
+        commit_message = commit.get('message', '')
+
+        logger.info(f"处理 commit: {commit_id[:8]} - {commit_message[:50]}")
+
+        # GitLab webhook 中文件变更信息
+        # GitLab 使用 'added', 'modified', 'removed' 字段
+        added = commit.get('added', [])
+        modified = commit.get('modified', [])
+        removed = commit.get('removed', [])
+
+        logger.info(f"文件变更统计 - 新增: {len(added)}, 修改: {len(modified)}, 删除: {len(removed)}")
+
+        # 合并所有变更的文件
+        all_changed_files = []
+
+        # 处理添加的文件
+        for file_info in added:
+            if isinstance(file_info, dict):
+                # GitLab 可能返回文件对象而不是字符串
+                file_path = file_info.get('path', '')
+                all_changed_files.append({'path': file_path, 'action': 'added'})
+            else:
+                all_changed_files.append({'path': file_info, 'action': 'added'})
+
+        # 处理修改的文件
+        for file_info in modified:
+            if isinstance(file_info, dict):
+                file_path = file_info.get('path', '')
+                all_changed_files.append({'path': file_path, 'action': 'modified'})
+            else:
+                all_changed_files.append({'path': file_info, 'action': 'modified'})
+
+        # 提取 SQL 文件
+        for file_info in all_changed_files:
+            file_path = file_info.get('path', file_info if isinstance(file_info, str) else '')
+
+            if file_path.lower().endswith('.sql'):
+                sql_files.append({
+                    'file_path': file_path,
+                    'commit_id': commit_id,
+                    'commit_message': commit_message,
+                    'action': file_info.get('action', 'modified')
+                })
+                logger.info(f"发现 SQL 文件: {file_path}")
+
+    logger.info(f"总共发现 {len(sql_files)} 个 SQL 文件")
+    return sql_files
+
+async def fetch_file_content(repo_full_name: str, file_path: str, commit_sha: str) -> Optional[str]:
+    """通过 SSH 从 GitLab 获取文件内容"""
+    if not ssh_configured:
+        logger.warning("SSH 配置未完成，无法获取文件内容")
+        return None
+
+    # 创建临时目录
+    try:
+        # 设置 SSH 环境
+        env = os.environ.copy()
+        ssh_command_parts = []
+
+        # 优先使用环境变量中的密钥内容
+        ssh_key_content = GITHUB_SSH_KEY_CONTENT
+            # 使用默认的 SSH 配置 (~/.ssh/id_rsa)
+        default_key = Path.home() / ".ssh" / "id_rsa"
+        if default_key.exists():
+            ssh_command_parts.append(f"-i {default_key}")
+            logger.info(f"使用默认 SSH 密钥: {default_key}")
+        else:
+            logger.warning("未找到 SSH 密钥，使用默认 SSH 配置")
+                
+
+        # 添加 SSH 配置选项
+        ssh_command_parts.extend([
+            "-o StrictHostKeyChecking=no",
+            "-o UserKnownHostsFile=/dev/null",
+            "-o LogLevel=ERROR"
+        ])
+
+        # 构建 SSH 命令
+        if ssh_command_parts:
+            ssh_command = f"ssh {' '.join(ssh_command_parts)}"
+            env['GIT_SSH_COMMAND'] = ssh_command
+            logger.info(f"SSH 命令: {ssh_command}")
+
+        # 设置 Git 用户信息
+        env['GIT_AUTHOR_NAME'] = GITHUB_USER
+        env['GIT_AUTHOR_EMAIL'] = GITHUB_EMAIL or "sql-optimizer@example.com"
+        env['GIT_COMMITTER_NAME'] = GITHUB_USER
+        env['GIT_COMMITTER_EMAIL'] = GITHUB_EMAIL or "sql-optimizer@example.com"
+
+        repo_url = f"ssh://git@git.nd.com.cn:10022/data-tech/monitor/{repo_full_name}.git"
+      
+        logger.info(f"尝试克隆仓库: {repo_url}")
+        logger.info(f"仓库完整名称: {repo_full_name}")
+
+        # 使用临时目录，避免路径冲突
+        import tempfile
+        import shutil
+        
+        temp_dir = tempfile.mkdtemp(prefix="git_clone_")
+        clone_path = Path(temp_dir) / "repo"
+        logger.info(f"使用临时目录: {clone_path}")
+
+        try:
+            # 克隆特定 commit
+            clone_cmd = [
+                'git', 'clone', '--depth', '1',
+                '--no-checkout', repo_url, str(clone_path)
+            ]
+
+            logger.info(f"执行克隆命令: {' '.join(clone_cmd)}")
+            result = subprocess.run(
+                clone_cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=60
+            )
+
+            if result.returncode != 0:
+                logger.error(f"Git 克隆失败: {result.stderr}")
+                logger.error(f"克隆命令输出: {result.stdout}")
+                # 清理临时目录
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return None
+
+            logger.info("仓库克隆成功")
+
+            # 切换到指定 commit 并检出文件
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(clone_path)
+
+                # 检出特定 commit
+                checkout_cmd = ['git', 'checkout', commit_sha, '--', file_path]
+                logger.info(f"执行检出命令: {' '.join(checkout_cmd)}")
+
+                result = subprocess.run(
+                    checkout_cmd,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=30
+                )
+
+                if result.returncode != 0:
+                    logger.error(f"Git 检出失败: {file_path}, 错误: {result.stderr}")
+                    return None
+
+                logger.info("文件检出成功")
+
+                # 读取文件内容
+                file_full_path = clone_path / file_path
+                if file_full_path.exists():
+                    content = file_full_path.read_text(encoding='utf-8', errors='ignore')
+                    logger.info(f"成功读取文件内容，长度: {len(content)} 字符")
+                    return content
+                else:
+                    logger.error(f"文件不存在: {file_path}")
+                    return None
+
+            finally:
+                # 恢复原始工作目录
+                os.chdir(original_cwd)
+                
+        except subprocess.TimeoutExpired:
+            logger.error(f"Git 操作超时: {file_path}")
+            return None
+        except Exception as e:
+            logger.error(f"通过 SSH 获取文件内容失败: {e}")
+            import traceback
+            logger.error(f"详细错误信息: {traceback.format_exc()}")
+            return None
+        finally:
+            # 清理临时目录
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                logger.info(f"已清理临时目录: {temp_dir}")
+            except Exception as e:
+                logger.warning(f"清理临时目录失败: {e}")
+
+    except Exception as e:
+        logger.error(f"创建临时目录或克隆仓库失败: {e}")
+        return None
+
+async def post_github_comment(repo_full_name: str, commit_sha: str, comment: str) -> bool:
+    """在 Git commit 上发布评论 (支持 SSH 方式，适用于 git.nd.com.cn)"""
+
+    # 注意：由于使用 git.nd.com.cn 而非 GitHub.com，GitHub API 不可用
+    # 直接使用 SSH 方式创建带评论的 tag
+    logger.info("使用 SSH 方式创建评论 tag (适用于 git.nd.com.cn)")
+
+    # 使用 SSH 方式创建带评论的 tag
+    if not ssh_configured:
+        logger.warning("SSH 配置未完成且无 Token，无法发布评论")
+        return False
+
+    try:
+        # 设置 SSH 环境
+        env = os.environ.copy()
+
+        # 设置 SSH 密钥
+        ssh_key_path = GITHUB_SSH_KEY_PATH
+        if ssh_key_path and Path(ssh_key_path).exists():
+            env['GIT_SSH_COMMAND'] = f'ssh -i {ssh_key_path} -o StrictHostKeyChecking=no -o UserKnownHostsFile={GITHUB_KNOWN_HOSTS_PATH}'
+      
+        # 设置 Git 用户信息
+        env['GIT_AUTHOR_NAME'] = GITHUB_USER
+        env['GIT_AUTHOR_EMAIL'] = GITHUB_EMAIL or "sql-optimizer@example.com"
+        env['GIT_COMMITTER_NAME'] = GITHUB_USER
+        env['GIT_COMMITTER_EMAIL'] = GITHUB_EMAIL or "sql-optimizer@example.com"
+
+        repo_url = f"ssh://git@git.nd.com.cn:10022/data-tech/monitor/{repo_full_name}.git"
+        clone_path = "/data/optimize_sql/repo"
+
+        # 克隆仓库
+        clone_cmd = ['git', 'clone', repo_url, str(clone_path)]
+        result = subprocess.run(
+            clone_cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60
+        )
+
+        if result.returncode != 0:
+            logger.error(f"Git 克隆失败: {result.stderr}")
+            return False
+
+        os.chdir(clone_path)
+
+        # 创建带评论的 tag 作为备选方案
+        tag_name = f"sql-review-{commit_sha[:8]}"
+        tag_message = f"SQL 优化审核报告\n\n{comment[:500]}"  # 限制长度
+
+        # 创建 annotated tag
+        tag_cmd = ['git', 'tag', '-a', tag_name, commit_sha, '-m', tag_message]
+        result = subprocess.run(
+            tag_cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30
+        )
+
+        if result.returncode != 0:
+            logger.error(f"Git tag 创建失败: {result.stderr}")
+            return False
+
+        # 推送 tag
+        push_cmd = ['git', 'push', 'origin', tag_name]
+        result = subprocess.run(
+            push_cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30
+        )
+
+        if result.returncode == 0:
+            logger.info(f"✅ 通过 SSH 创建评论 tag: {tag_name}")
+            return True
+        else:
+            logger.error(f"Git push 失败: {result.stderr}")
+            return False
+
+    except subprocess.TimeoutExpired:
+        logger.error("Git 操作超时")
+        return False
+    except Exception as e:
+        logger.error(f"SSH 方式发布评论失败: {e}")
+        return False
+
+def format_review_comment(reviews: List[SQLReviewResult]) -> str:
+    """格式化审核结果为 Markdown 评论"""
+    comment_parts = ["## 🔍 SQL 代码审核报告\n"]
+    
+    # 统计
+    total_files = len(reviews)
+    critical_count = sum(1 for r in reviews if r.severity == 'critical')
+    high_count = sum(1 for r in reviews if r.severity == 'high')
+    medium_count = sum(1 for r in reviews if r.severity == 'medium')
+    
+    comment_parts.append(f"**总计**: {total_files} 个 SQL 文件\n")
+    
+    if critical_count > 0:
+        comment_parts.append(f"🚨 **严重问题**: {critical_count}\n")
+    if high_count > 0:
+        comment_parts.append(f"⚠️ **高优先级**: {high_count}\n")
+    if medium_count > 0:
+        comment_parts.append(f"💡 **中等优先级**: {medium_count}\n")
+    
+    comment_parts.append("\n---\n\n")
+    
+    # 每个文件的详细信息
+    for review in reviews:
+        severity_emoji = {
+            'critical': '🚨',
+            'high': '⚠️',
+            'medium': '💡',
+            'low': '✅'
+        }.get(review.severity, '📝')
+        
+        comment_parts.append(f"### {severity_emoji} {review.file_path}\n\n")
+        comment_parts.append(f"**状态**: {review.status}\n\n")
+        
+        if review.issues:
+            comment_parts.append("**发现的问题**:\n")
+            for i, issue in enumerate(review.issues[:5], 1):  # 限制显示前5个
+                comment_parts.append(f"{i}. {issue}\n")
+            comment_parts.append("\n")
+        
+        if review.optimizations:
+            comment_parts.append("**优化建议**:\n")
+            for i, opt in enumerate(review.optimizations[:3], 1):  # 限制显示前3个
+                comment_parts.append(f"{i}. {opt}\n")
+            comment_parts.append("\n")
+        
+        if review.optimized_sql:
+            comment_parts.append("<details>\n")
+            comment_parts.append("<summary>查看优化后的 SQL</summary>\n\n")
+            comment_parts.append("```sql\n")
+            comment_parts.append(review.optimized_sql[:500])  # 限制长度
+            if len(review.optimized_sql) > 500:
+                comment_parts.append("\n... (已截断)")
+            comment_parts.append("\n```\n")
+            comment_parts.append("</details>\n\n")
+        
+        comment_parts.append("---\n\n")
+    
+    comment_parts.append("\n🤖 *此报告由 SQL 优化审核系统自动生成*")
+    
+    return "".join(comment_parts)
+
+@app.post("/api/webhook/gitlab", response_model=WebhookResponse)
+async def gitlab_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks
+):
+    """
+    GitLab Webhook 接口
+
+    配置说明:
+    1. 在 GitLab 项目设置中添加 Webhook
+    2. URL: http://your-server:8004/api/webhook/gitlab
+    3. Secret Token: 设置一个密钥（与 GITHUB_WEBHOOK_SECRET 环境变量一致）
+    4. 触发事件: Push events
+
+    环境变量:
+    - GITHUB_WEBHOOK_SECRET: webhook 密钥（用于验证请求）
+    """
+    webhook_id = str(uuid.uuid4())
+
+    try:
+        # 读取请求体
+        payload_body = await request.body()
+
+        # 手动获取 GitLab headers
+        headers = dict(request.headers)
+        x_gitlab_token = headers.get("x-gitlab-token") or headers.get("X-Gitlab-Token")
+        x_gitlab_event = headers.get("x-gitlab-event") or headers.get("X-Gitlab-Event")
+        x_gitlab_signature = headers.get("x-gitlab-signature") or headers.get("X-Gitlab-Signature")
+
+        logger.info(f"收到 GitLab webhook 请求，事件: {x_gitlab_event}")
+        logger.info(f"Token: {x_gitlab_token is not None}, Signature: {x_gitlab_signature is not None}")
+
+        # 验证签名或token
+        if not verify_gitlab_signature(payload_body, x_gitlab_signature, x_gitlab_token):
+            logger.warning("GitLab webhook 验证失败")
+            raise HTTPException(status_code=401, detail="Webhook 验证失败")
+
+        # 只处理 push 事件
+        if x_gitlab_event != "Push Hook":
+            logger.info(f"忽略非 push 事件: {x_gitlab_event}")
+            return WebhookResponse(
+                webhook_id=webhook_id,
+                status="ignored",
+                message=f"仅处理 Push Hook 事件，当前事件: {x_gitlab_event}",
+                timestamp=datetime.now().isoformat(),
+                sql_files_found=0
+            )
+        
+        # 解析 payload
+        try:
+            payload = json.loads(payload_body)
+            logger.info(f"Payload type: {type(payload)}")
+            logger.info(f"Payload keys: {payload.keys() if isinstance(payload, dict) else 'Not a dict'}")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON 解析失败: {e}")
+            logger.error(f"Payload body: {payload_body[:500]}...")  # 显示前500个字符
+            raise
+
+        # 提取 GitLab 特有信息
+        if not isinstance(payload, dict):
+            logger.error(f"Payload 不是字典类型: {type(payload)}")
+            raise HTTPException(status_code=400, detail="无效的 webhook payload 格式")
+
+        project = payload.get('project', {})
+        if not isinstance(project, dict):
+            logger.error(f"Project 字段不是字典类型: {type(project)}")
+            project = {}
+
+        repo_name = project.get('name', '')  # GitLab 项目名称
+        namespace = project.get('namespace', {})
+        if isinstance(namespace, dict):
+            namespace_name = namespace.get('name', '')
+            repo_full_name = f"{namespace_name}/{repo_name}" if namespace_name else repo_name
+        else:
+            repo_full_name = repo_name
+
+        # GitLab 的 commits 结构与 GitHub 略有不同
+        commits = payload.get('commits', [])
+        if not isinstance(commits, list):
+            logger.error(f"Commits 字段不是列表类型: {type(commits)}")
+            commits = []
+
+        if not commits:
+            logger.info("没有提交信息")
+            return WebhookResponse(
+                webhook_id=webhook_id,
+                status="no_commits",
+                message="没有找到提交信息",
+                timestamp=datetime.now().isoformat(),
+                repository=repo_full_name,
+                sql_files_found=0
+            )
+        
+        # 提取 SQL 文件
+        sql_files = extract_sql_files(commits)
+
+        if not sql_files:
+            logger.info("没有发现 SQL 文件变更")
+            return WebhookResponse(
+                webhook_id=webhook_id,
+                status="no_sql_files",
+                message="没有发现 SQL 文件变更",
+                timestamp=datetime.now().isoformat(),
+                repository=repo_full_name,
+                commit=commits[0].get('id', '') if commits else '',
+                sql_files_found=0
+            )
+
+        logger.info(f"发现 {len(sql_files)} 个 SQL 文件需要审核")
+
+        # 提交后台任务进行审核
+        background_tasks.add_task(
+            process_sql_reviews_single_agent,
+            webhook_id,
+            repo_full_name,
+            sql_files,
+            commits[0].get('id', '') if commits else ''
+        )
+
+        response = WebhookResponse(
+            webhook_id=webhook_id,
+            status="processing",
+            message=f"发现 {len(sql_files)} 个 SQL 文件，正在进行审核",
+            timestamp=datetime.now().isoformat(),
+            repository=repo_full_name,
+            commit=commits[0].get('id', '') if commits else '',
+            sql_files_found=len(sql_files)
+        )
+
+        # 保存到历史记录
+        webhook_history[webhook_id] = response
+
+        return response
+
+    except json.JSONDecodeError:
+        logger.error("无法解析 JSON payload")
+        raise HTTPException(status_code=400, detail="无效的 JSON payload")
+    except Exception as e:
+        logger.error(f"处理 GitLab webhook 失败: {e}")
+        raise HTTPException(status_code=500, detail=f"处理 webhook 失败: {str(e)}")
+
+# 保留 GitHub webhook 端点作为备用，但重定向到 GitLab 处理
+@app.post("/api/webhook/github", response_model=WebhookResponse)
+async def github_webhook_fallback(request: Request, background_tasks: BackgroundTasks):
+    """GitHub Webhook 备用端点，重定向到 GitLab 处理"""
+    logger.info("收到 GitHub webhook 请求，使用 GitLab 处理逻辑")
+    return await gitlab_webhook(request, background_tasks)
+
+async def process_sql_reviews_single_agent(webhook_id: str, repo_full_name: str, sql_files: List[Dict[str, Any]], commit_sha: str):
+    """后台处理 SQL 文件审核 - 单 Agent 架构"""
+    try:
+        reviews = []
+
+        for sql_file in sql_files:
+            file_path = sql_file['file_path']
+            logger.info(f"单 Agent 审核文件: {file_path}")
+
+            # 获取文件内容
+            sql_content = await fetch_file_content(repo_full_name, file_path, commit_sha)
+
+            if not sql_content:
+                reviews.append(SQLReviewResult(
+                    file_path=file_path,
+                    status="error",
+                    issues=["无法获取文件内容"],
+                    severity="medium"
+                ))
+                continue
+
+            # 调用单 Agent SQL 优化服务
+            try:
+                if sql_optimizer_instance:
+                    optimization_result = sql_optimizer_instance.optimize_sql(sql_content)
+
+                    # 提取问题和优化建议
+                    issues = optimization_result.get("issues_found", [])
+                    optimizations = optimization_result.get("optimizations_applied", [])
+                    optimized_sql = optimization_result.get("optimized_sql", "")
+
+                    # 确定严重程度
+                    severity = "low"
+                    if any(keyword in str(issues).lower() for keyword in ['critical', '严重', 'error']):
+                        severity = "critical"
+                    elif any(keyword in str(issues).lower() for keyword in ['warning', '警告', 'high']):
+                        severity = "high"
+                    elif len(issues) > 3:
+                        severity = "medium"
+
+                    reviews.append(SQLReviewResult(
+                        file_path=file_path,
+                        status="reviewed",
+                        issues=issues if isinstance(issues, list) else [str(issues)],
+                        optimizations=optimizations if isinstance(optimizations, list) else [str(optimizations)],
+                        optimized_sql=optimized_sql,
+                        severity=severity
+                    ))
+                else:
+                    reviews.append(SQLReviewResult(
+                        file_path=file_path,
+                        status="error",
+                        issues=["单 Agent 优化服务未初始化"],
+                        severity="medium"
+                    ))
+
+            except Exception as e:
+                logger.error(f"单 Agent 审核文件 {file_path} 失败: {e}")
+                reviews.append(SQLReviewResult(
+                    file_path=file_path,
+                    status="error",
+                    issues=[f"单 Agent 审核失败: {str(e)}"],
+                    severity="high"
+                ))
+
+        # 更新 webhook 历史记录
+        if webhook_id in webhook_history:
+            webhook_history[webhook_id].status = "completed"
+            webhook_history[webhook_id].reviews = reviews
+            webhook_history[webhook_id].message = f"单 Agent 已完成 {len(reviews)} 个文件的审核"
+
+        # 在 GitHub 上发布评论
+        comment = format_review_comment(reviews)
+        await post_github_comment(repo_full_name, commit_sha, comment)
+
+        logger.info(f"单 Agent Webhook {webhook_id} 处理完成")
+
+    except Exception as e:
+        logger.error(f"单 Agent 处理 SQL 审核失败: {e}")
+        if webhook_id in webhook_history:
+            webhook_history[webhook_id].status = "failed"
+            webhook_history[webhook_id].message = f"单 Agent 处理失败: {str(e)}"
+
+@app.get("/api/webhook/{webhook_id}", response_model=WebhookResponse)
+async def get_webhook_status(webhook_id: str):
+    """获取 webhook 处理状态"""
+    if webhook_id not in webhook_history:
+        raise HTTPException(status_code=404, detail="Webhook 记录不存在")
+    
+    return webhook_history[webhook_id]
+
+@app.get("/api/webhooks")
+async def list_webhooks():
+    """列出所有 webhook 处理记录"""
+    return {
+        "webhooks": list(webhook_history.values()),
+        "total": len(webhook_history)
+    }
+
+@app.post("/api/batch-optimize")
+async def batch_optimize_sql(requests: List[SQLOptimizationRequest]):
+    """
+    批量优化 SQL 查询 - 单 Agent 架构
+
+    最多支持 10 个 SQL 语句的批量优化
+    """
+    if len(requests) > 10:
+        raise HTTPException(status_code=400, detail="批量请求最多支持 10 个 SQL 语句")
+
+    if not sql_optimizer_instance:
+        raise HTTPException(
+            status_code=503,
+            detail="SQL 优化器未初始化，服务暂时不可用"
+        )
+
+    results = []
+    start_time = datetime.now()
+
+    for i, request in enumerate(requests):
+        try:
+            logger.info(f"单 Agent 处理批量优化 {i+1}/{len(requests)}")
+
+            # 单 Agent 执行完整优化分析
+            optimization_result = sql_optimizer_instance.optimize_sql(request.sql_query)
+            review_result = None  # 单 Agent 已包含综合分析
+            final_status = "OPTIMIZED_BY_SINGLE_AGENT"
+
+            results.append({
+                "index": i,
+                "status": "success",
+                "optimization_result": optimization_result,
+                "review_result": review_result,
+                "final_status": final_status
+            })
+
+        except Exception as e:
+            logger.error(f"单 Agent 批量优化第 {i+1} 个失败: {str(e)}")
+            results.append({
+                "index": i,
+                "status": "failed",
+                "error": str(e)
+            })
+
+    processing_time = (datetime.now() - start_time).total_seconds()
+
+    return {
+        "batch_id": str(uuid.uuid4()),
+        "total": len(requests),
+        "successful": sum(1 for r in results if r["status"] == "success"),
+        "failed": sum(1 for r in results if r["status"] == "failed"),
+        "processing_time": processing_time,
+        "results": results,
+        "timestamp": datetime.now().isoformat()
+    }
+
+# 错误处理
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    logger.error(f"全局异常: {str(exc)}")
+    return HTTPException(
+        status_code=500,
+        detail=f"服务器内部错误: {str(exc)}"
+    )
+
+# 启动命令提示
 if __name__ == "__main__":
+    import uvicorn
+
     print("""
     ╔══════════════════════════════════════════════════════════════════╗
-    ║                A2A Framework SQL 优化审核系统                     ║
-    ║                      (AutoGen 0.4+ 版本)                         ║
+    ║      SQL 优化审核系统 FastAPI 服务 (单 Agent + SSH 架构)         ║
     ║                                                                  ║
-    ║  技术栈:                                                          ║
-    ║    • CrewAI          - 协作式 AI Agent (SQL 优化)               ║
-    ║    • AutoGen 0.7+    - 新架构对话式 Agent (SQL 审核)            ║
-    ║    • A2A Protocol    - Agent-to-Agent 通信协议                  ║
+    ║  架构特点:                                                       ║
+    ║    • 单一综合 SQL 专家 Agent                                      ║
+    ║    • SSH 方式访问 GitHub (更安全的认证)                           ║
+    ║    • 简化的工作流程，高效执行                                     ║
+    ║    • 集成分析、优化、报告于一体                                   ║
     ║                                                                  ║
-    ║  工作流:                                                         ║
-    ║    User → CrewAI Optimizer → AutoGen Reviewer → User            ║
+    ║  启动命令:                                                        ║
+    ║    uvicorn fastapi_service:app --host 0.0.0.0 --port 8004       ║
     ║                                                                  ║
-    ║  依赖安装:                                                       ║
-    ║    pip install crewai crewai-tools                              ║
-    ║    pip install autogen-agentchat autogen-core autogen-ext       ║
-    ║    pip install openai python-dotenv                             ║
+    ║  API 文档:                                                        ║
+    ║    http://localhost:8004/docs                                     ║
+    ║                                                                  ║
+    ║  主要端点:                                                        ║
+    ║    POST /api/optimize          - 同步 SQL 优化 (单 Agent)        ║
+    ║    POST /api/optimize-async    - 异步 SQL 优化 (单 Agent)        ║
+    ║    GET  /api/task/{task_id}    - 查询任务状态                     ║
+    ║    POST /api/batch-optimize    - 批量 SQL 优化 (单 Agent)        ║
+    ║    POST /api/webhook/gitlab    - GitLab Webhook (SSH 审核)        ║
+    ║    POST /api/webhook/github    - GitHub Webhook 备用端点          ║
+    ║    GET  /api/webhook/{id}      - 查询 webhook 状态               ║
+    ║    GET  /api/health            - 健康检查 (含 SSH 状态)           ║
+    ║                                                                  ║
+    ║  环境变量配置:                                                    ║
+    ║    GITHUB_SSH_KEY_PATH      - SSH 私钥文件路径                    ║
+    ║    GITHUB_SSH_KEY_CONTENT   - SSH 私钥内容 (可选)                 ║
+    ║    GITHUB_USER              - Git 用户名                          ║
+    ║    GITHUB_EMAIL             - Git 邮箱地址                        ║
+    ║    GITHUB_WEBHOOK_SECRET    - GitLab Webhook 密钥 (Token)          ║
+    ║    OPENAI_API_KEY           - LLM API 密钥                        ║
+    ║    OPENAI_BASE_URL          - LLM 基础 URL                        ║
+    ║                                                                  ║
     ╚══════════════════════════════════════════════════════════════════╝
     """)
-    asyncio.run(main())
+
+    uvicorn.run(
+        "fastapi_service:app",
+        host="0.0.0.0",
+        port=8004,
+        reload=True,
+        log_level="info"
+    )
