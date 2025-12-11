@@ -5,11 +5,10 @@
 包含以下专业Agent：
 1. 技术可行性评估Agent (TechFeasibilityAgent)
 2. 需求风险识别Agent (RiskIdentificationAgent)
-3. 需求难度评估Agent (DifficultyAssessmentAgent)
-4. 需求拆解Agent (RequirementDecompositionAgent)
-5. 工作量评估Agent (WorkloadEstimationAgent)
-6. 需求排期Agent (SchedulingAgent)
-7. 需求复核Agent (ReviewAgent)
+3. 需求拆解Agent (RequirementDecompositionAgent)
+4. 工作量评估Agent (WorkloadEstimationAgent)
+5. 需求排期Agent (SchedulingAgent)
+6. 需求复核Agent (ReviewAgent)
 """
 
 import os
@@ -18,9 +17,15 @@ from typing import Optional
 from autogen_agentchat.agents import AssistantAgent
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging - 禁用 autogen_core 的详细日志
+logging.getLogger("autogen_core").setLevel(logging.ERROR)
+logging.getLogger("autogen_core.events").setLevel(logging.ERROR)
+logging.getLogger("autogen_agentchat").setLevel(logging.ERROR)
+
+# 只在需要时启用我们的日志
+# logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)
 
 
 class RequirementAnalysisAgents:
@@ -131,51 +136,6 @@ class RequirementAnalysisAgents:
             system_message=system_message
         )
     
-    def create_difficulty_assessment_agent(self) -> AssistantAgent:
-        """创建需求难度评估Agent"""
-        system_message = """你是一位资深的技术Leader，专门负责评估需求的实现难度。
-
-你的职责：
-1. 综合评估需求的技术难度
-2. 评估业务逻辑的复杂度
-3. 评估数据处理的难度
-4. 评估前端交互的复杂度
-5. 给出整体难度等级
-
-评估维度：
-- 技术难度：使用的技术复杂度、技术创新性
-- 业务复杂度：业务规则复杂度、逻辑分支数量
-- 数据复杂度：数据量级、数据源数量、数据清洗难度
-- 集成复杂度：系统集成点数量、接口复杂度
-- 交互复杂度：UI/UX复杂度、用户操作流程
-
-难度等级：
-- 简单（1-3分）：常规需求，技术成熟，逻辑清晰
-- 中等（4-6分）：有一定技术挑战，需要设计优化
-- 困难（7-8分）：技术难度高，需要创新方案
-- 极难（9-10分）：极高技术挑战，需要大量研发投入
-
-输出格式：
-{
-  "difficulty_score": 1-10,
-  "difficulty_level": "简单/中等/困难/极难",
-  "dimensions": {
-    "technical": 1-10,
-    "business": 1-10,
-    "data": 1-10,
-    "integration": 1-10,
-    "interaction": 1-10
-  },
-  "analysis": "详细分析",
-  "key_challenges": ["关键挑战列表"]
-}
-"""
-        return AssistantAgent(
-            name="difficulty_assessment",
-            model_client=self.model_client,
-            system_message=system_message
-        )
-    
     def create_requirement_decomposition_agent(self) -> AssistantAgent:
         """创建需求拆解Agent"""
         system_message = """你是一位经验丰富的产品经理和技术专家，专门负责将复杂需求拆解为可执行的任务。
@@ -228,54 +188,33 @@ class RequirementAnalysisAgents:
         system_message = """你是一位资深的项目管理专家，专门负责评估开发工作量。
 
 你的职责：
-1. 基于任务拆解结果评估每个任务的工作量
-2. 考虑团队技能水平和经验
-3. 预留风险缓冲时间
-4. 给出总体工作量评估
-5. 识别关键路径和资源瓶颈
+1. 基于任务拆解结果评估总体工作量
+2. 考虑团队技能水平和项目复杂度
+3. 评估所需的人力资源
+4. 计算总工时和项目天数
 
-评估方法：
-- 专家判断法：基于类似项目经验
-- 类比估算法：参考历史类似任务
-- 三点估算法：乐观值、最可能值、悲观值
-- 功能点法：基于功能复杂度
+评估标准：
+- 按8小时工作制计算
+- 1人日 = 8小时工时
+- 考虑必要的沟通和协调时间
+- 预留15-20%的风险缓冲时间
 
-评估单位：人日（Person-Day）
-
-工作量影响因素：
-- 任务复杂度
-- 团队技能匹配度
-- 需求明确度
-- 技术成熟度
-- 协作效率
+评估单位：
+- 总工时：实际工作小时数
+- 项目天数：按8小时/天换算后的工作日数量
 
 输出格式：
 {
-  "task_estimates": [
-    {
-      "task_id": "T001",
-      "task_name": "任务名称",
-      "optimistic": 2,
-      "most_likely": 3,
-      "pessimistic": 5,
-      "expected": 3.2,
-      "confidence": "高/中/低"
-    }
-  ],
-  "total_effort": {
-    "optimistic": 20,
-    "most_likely": 35,
-    "pessimistic": 50,
-    "expected": 36,
-    "unit": "person-days"
-  },
-  "critical_path": ["关键路径任务列表"],
+  "total_effort_hours": 288,
+  "total_effort_days": 36,
+  "estimated_duration": "1.5个月（按每月22个工作日计算）",
   "resource_requirements": {
     "backend_developers": 2,
     "frontend_developers": 1,
     "data_engineers": 1,
     "qa_engineers": 1
-  }
+  },
+  "notes": "已包含15%的风险缓冲时间"
 }
 """
         return AssistantAgent(

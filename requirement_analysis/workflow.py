@@ -38,6 +38,7 @@ class RequirementAnalysisWorkflow:
             model=model
         )
         self.results = {}
+        self.timing_stats = {}
         
     async def analyze_requirement(
         self,
@@ -57,56 +58,73 @@ class RequirementAnalysisWorkflow:
         print("=" * 80)
         print("开始需求分析流程...")
         print("=" * 80)
-        
+
+        # 记录开始时间
+        workflow_start_time = datetime.now()
+
         # 1. 技术可行性评估
-        print("\n[阶段 1/7] 技术可行性评估...")
+        print("\n[阶段 1/6] 技术可行性评估...")
+        phase_start_time = datetime.now()
         tech_feasibility = await self._run_tech_feasibility_analysis(requirement_doc)
+        phase_end_time = datetime.now()
+        self.timing_stats["tech_feasibility"] = (phase_end_time - phase_start_time).total_seconds()
         self.results["tech_feasibility"] = tech_feasibility
-        
+
         # 2. 风险识别
-        print("\n[阶段 2/7] 需求风险识别...")
+        print("\n[阶段 2/6] 需求风险识别...")
+        phase_start_time = datetime.now()
         risk_analysis = await self._run_risk_identification(requirement_doc, tech_feasibility)
+        phase_end_time = datetime.now()
+        self.timing_stats["risk_identification"] = (phase_end_time - phase_start_time).total_seconds()
         self.results["risk_analysis"] = risk_analysis
-        
-        # 3. 难度评估
-        print("\n[阶段 3/7] 需求难度评估...")
-        difficulty = await self._run_difficulty_assessment(
-            requirement_doc, 
-            tech_feasibility,
-            risk_analysis
-        )
-        self.results["difficulty"] = difficulty
-        
-        # 4. 需求拆解
-        print("\n[阶段 4/7] 需求拆解...")
+
+        # 3. 需求拆解
+        print("\n[阶段 3/6] 需求拆解...")
+        phase_start_time = datetime.now()
         decomposition = await self._run_requirement_decomposition(
             requirement_doc,
             tech_feasibility,
-            difficulty
+            risk_analysis
         )
+        phase_end_time = datetime.now()
+        self.timing_stats["requirement_decomposition"] = (phase_end_time - phase_start_time).total_seconds()
         self.results["decomposition"] = decomposition
-        
-        # 5. 工作量评估
-        print("\n[阶段 5/7] 工作量评估...")
+
+        # 4. 工作量评估
+        print("\n[阶段 4/6] 工作量评估...")
+        phase_start_time = datetime.now()
         workload = await self._run_workload_estimation(
             decomposition,
-            difficulty
+            tech_feasibility,
+            risk_analysis
         )
+        phase_end_time = datetime.now()
+        self.timing_stats["workload_estimation"] = (phase_end_time - phase_start_time).total_seconds()
         self.results["workload"] = workload
-        
-        # 6. 排期规划
-        print("\n[阶段 6/7] 需求排期...")
+
+        # 5. 排期规划
+        print("\n[阶段 5/6] 需求排期...")
+        phase_start_time = datetime.now()
         schedule = await self._run_scheduling(
             decomposition,
             workload,
             risk_analysis
         )
+        phase_end_time = datetime.now()
+        self.timing_stats["scheduling"] = (phase_end_time - phase_start_time).total_seconds()
         self.results["schedule"] = schedule
-        
-        # 7. 需求复核
-        print("\n[阶段 7/7] 需求复核...")
+
+        # 6. 需求复核
+        print("\n[阶段 6/6] 需求复核...")
+        phase_start_time = datetime.now()
         review = await self._run_review(self.results)
+        phase_end_time = datetime.now()
+        self.timing_stats["review"] = (phase_end_time - phase_start_time).total_seconds()
         self.results["review"] = review
+
+        # 计算总耗时
+        workflow_end_time = datetime.now()
+        self.timing_stats["total_workflow_duration"] = (workflow_end_time - workflow_start_time).total_seconds()
         
         # 生成最终报告
         final_report = self._generate_final_report()
@@ -185,16 +203,16 @@ class RequirementAnalysisWorkflow:
         result = await team.run(task=task)
         return self._extract_json_from_messages(result.messages)
     
-    async def _run_difficulty_assessment(
+    async def _run_requirement_decomposition(
         self,
         requirement_doc: str,
         tech_feasibility: Dict[str, Any],
         risk_analysis: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """运行难度评估"""
-        agent = self.agent_factory.create_difficulty_assessment_agent()
-        
-        task = f"""请对以下需求进行难度评估：
+        """运行需求拆解"""
+        agent = self.agent_factory.create_requirement_decomposition_agent()
+
+        task = f"""请对以下需求进行任务拆解：
 
 需求文档：
 {requirement_doc}
@@ -204,53 +222,6 @@ class RequirementAnalysisWorkflow:
 
 风险分析：
 {json.dumps(risk_analysis, ensure_ascii=False, indent=2)}
-
-请严格按照以下JSON格式输出，不要包含任何其他文字，只输出JSON对象：难度评估结果：
-{{
-  "difficulty_score": 1-10,
-  "difficulty_level": "简单/中等/困难/极难",
-  "dimensions": {{
-    "technical": 1-10,
-    "business": 1-10,
-    "data": 1-10,
-    "integration": 1-10,
-    "interaction": 1-10
-  }},
-  "analysis": "详细分析",
-  "key_challenges": ["关键挑战列表"]
-}}
-
-
-"""
-        
-        termination = MaxMessageTermination(2)
-        team = RoundRobinGroupChat(
-            participants=[agent],
-            termination_condition=termination
-        )
-        
-        result = await team.run(task=task)
-        return self._extract_json_from_messages(result.messages)
-    
-    async def _run_requirement_decomposition(
-        self,
-        requirement_doc: str,
-        tech_feasibility: Dict[str, Any],
-        difficulty: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """运行需求拆解"""
-        agent = self.agent_factory.create_requirement_decomposition_agent()
-        
-        task = f"""请对以下需求进行任务拆解：
-
-需求文档：
-{requirement_doc}
-
-技术可行性：
-{json.dumps(tech_feasibility, ensure_ascii=False, indent=2)}
-
-难度评估：
-{json.dumps(difficulty, ensure_ascii=False, indent=2)}
 
 请严格按照以下JSON格式输出，不要包含任何其他文字，只输出JSON对象：任务拆解结果：
 {{
@@ -283,45 +254,28 @@ class RequirementAnalysisWorkflow:
     async def _run_workload_estimation(
         self,
         decomposition: Dict[str, Any],
-        difficulty: Dict[str, Any]
+        tech_feasibility: Dict[str, Any],
+        risk_analysis: Dict[str, Any]
     ) -> Dict[str, Any]:
         """运行工作量评估"""
         agent = self.agent_factory.create_workload_estimation_agent()
-        
+
         task = f"""请对以下任务进行工作量评估：
 
 任务拆解结果：
 {json.dumps(decomposition, ensure_ascii=False, indent=2)}
 
-难度评估：
-{json.dumps(difficulty, ensure_ascii=False, indent=2)}
+技术可行性参考：
+{json.dumps(tech_feasibility, ensure_ascii=False, indent=2)}
+
+风险分析参考：
+{json.dumps(risk_analysis, ensure_ascii=False, indent=2)}
 
 请严格按照以下JSON格式输出，不要包含任何其他文字，只输出JSON对象：工作量评估结果：
 {{
-  "task_estimates": [
-    {{
-      "task_id": "T001",
-      "task_name": "任务名称",
-      "optimistic": 2,
-      "most_likely": 3,
-      "pessimistic": 5,
-      "expected": 3.2,
-      "confidence": "高/中/低"
-    }}
-  ],
   "total_effort": {{
-    "optimistic": 20,
-    "most_likely": 35,
-    "pessimistic": 50,
     "expected": 36,
     "unit": "person-days"
-  }},
-  "critical_path": ["关键路径任务列表"],
-  "resource_requirements": {{
-    "backend_developers": 2,
-    "frontend_developers": 1,
-    "data_engineers": 1,
-    "qa_engineers": 1
   }}
 }}
 
@@ -495,19 +449,9 @@ class RequirementAnalysisWorkflow:
             "note": "未能解析为结构化JSON"
         }
     
-    def _generate_final_report(self) -> Dict[str, Any]:
-        """生成最终分析报告"""
-        return {
-            "analysis_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "tech_feasibility": self.results.get("tech_feasibility", {}),
-            "risk_analysis": self.results.get("risk_analysis", {}),
-            "difficulty_assessment": self.results.get("difficulty", {}),
-            "requirement_decomposition": self.results.get("decomposition", {}),
-            "workload_estimation": self.results.get("workload", {}),
-            "project_schedule": self.results.get("schedule", {}),
-            "final_review": self.results.get("review", {}),
-            "summary": self._generate_summary()
-        }
+    def _generate_final_report(self) -> str:
+        """生成最终分析报告（格式化文本）"""
+        return self._generate_formatted_report()
     
     def _generate_summary(self) -> Dict[str, Any]:
         """生成摘要信息"""
@@ -515,7 +459,7 @@ class RequirementAnalysisWorkflow:
         workload = self.results.get("workload", {})
         schedule = self.results.get("schedule", {})
         risk = self.results.get("risk_analysis", {})
-        
+
         return {
             "approval_status": review.get("review_result", "未知"),
             "total_effort_days": workload.get("total_effort", {}).get("expected", 0),
@@ -523,6 +467,136 @@ class RequirementAnalysisWorkflow:
             "risk_level": risk.get("overall_risk_level", "未知"),
             "key_recommendations": review.get("recommendations", [])
         }
+
+    def _generate_formatted_report(self) -> str:
+        """生成格式化的易读报告"""
+        lines = []
+
+        # 标题
+        lines.append("=" * 80)
+        lines.append("                    需求分析报告")
+        lines.append("=" * 80)
+        lines.append(f"分析时间: {datetime.now().strftime('%Y年%m月%d日 %H:%M')}")
+        lines.append("")
+
+        # 1. 技术可行性评估
+        lines.append("📊 1. 技术可行性评估")
+        lines.append("-" * 40)
+        tech = self.results.get("tech_feasibility", {})
+        if tech:
+            lines.append(f"可行性评级: {tech.get('feasibility_score', '未知')}")
+            lines.append(f"技术栈: {', '.join(tech.get('tech_stack', []))}")
+            lines.append(f"数据源: {', '.join(tech.get('data_sources', []))}")
+            if tech.get('technical_challenges'):
+                lines.append("\n技术挑战:")
+                for challenge in tech.get('technical_challenges', [])[:3]:
+                    lines.append(f"  • {challenge}")
+        lines.append("")
+
+        # 2. 风险分析
+        lines.append("⚠️  2. 风险分析")
+        lines.append("-" * 40)
+        risk = self.results.get("risk_analysis", {})
+        if risk:
+            lines.append(f"整体风险等级: {risk.get('overall_risk_level', '未知')}")
+            risks = risk.get('risks', [])
+            if risks:
+                lines.append("\n主要风险项:")
+                for risk_item in risks[:3]:
+                    lines.append(f"  • {risk_item.get('category', '未分类')}: {risk_item.get('description', '')}")
+                    lines.append(f"    概率: {risk_item.get('probability', '')}, 影响: {risk_item.get('impact', '')}")
+        lines.append("")
+
+        # 3. 需求拆解
+        lines.append("📋 3. 需求拆解")
+        lines.append("-" * 40)
+        decomposition = self.results.get("decomposition", {})
+        if decomposition:
+            tasks = decomposition.get('tasks', [])
+            if tasks:
+                lines.append(f"任务总数: {len(tasks)}")
+                lines.append("\n主要任务:")
+                for i, task in enumerate(tasks[:5], 1):
+                    lines.append(f"  {i}. {task.get('task_name', '未命名')} (优先级: {task.get('priority', '未定')})")
+                if len(tasks) > 5:
+                    lines.append(f"  ... 还有 {len(tasks) - 5} 个任务")
+        lines.append("")
+
+        # 4. 工作量评估
+        lines.append("⏱️  4. 工作量评估")
+        lines.append("-" * 40)
+        workload = self.results.get("workload", {})
+        if workload:
+            total = workload.get("total_effort", {})
+            lines.append(f"预估总工作量: {total.get('expected', 0):.1f} 人日")
+        lines.append("")
+
+        # 5. 项目排期
+        lines.append("📅 5. 项目排期")
+        lines.append("-" * 40)
+        schedule = self.results.get("schedule", {})
+        if schedule:
+            timeline = schedule.get("project_timeline", {})
+            if timeline:
+                lines.append(f"项目周期: {timeline.get('total_duration', '未知')}")
+                lines.append(f"开始时间: {timeline.get('start_date', '未定')}")
+                lines.append(f"结束时间: {timeline.get('end_date', '未定')}")
+        lines.append("")
+
+        # 6. 最终评审
+        lines.append("✅ 6. 最终评审结论")
+        lines.append("-" * 40)
+        review = self.results.get("review", {})
+        if review:
+            lines.append(f"评审结果: {review.get('review_result', '未知')}")
+
+            # 完整性检查
+            completeness = review.get("completeness_check", {})
+            if completeness:
+                lines.append(f"完整性评分: {completeness.get('score', '未评分')}")
+
+            # 可行性检查
+            feasibility = review.get("feasibility_check", {})
+            if feasibility:
+                lines.append(f"可行性评分: {feasibility.get('score', '未评分')}")
+
+            recommendations = review.get("recommendations", [])
+            if recommendations:
+                lines.append("\n关键建议:")
+                for rec in recommendations[:3]:
+                    lines.append(f"  • {rec}")
+        lines.append("")
+
+        # 7. 工作流耗时统计
+        lines.append("⏱️  7. 工作流耗时统计")
+        lines.append("-" * 40)
+        if self.timing_stats:
+            total_duration = self.timing_stats.get("total_workflow_duration", 0)
+            lines.append(f"整个工作流总耗时: {total_duration:.2f} 秒 ({total_duration/60:.2f} 分钟)")
+            lines.append("")
+
+            phase_names = {
+                "tech_feasibility": "技术可行性评估",
+                "risk_identification": "风险识别",
+                "requirement_decomposition": "需求拆解",
+                "workload_estimation": "工作量评估",
+                "scheduling": "排期规划",
+                "review": "需求复核"
+            }
+
+            lines.append("各阶段耗时:")
+            for phase_key, phase_name in phase_names.items():
+                duration = self.timing_stats.get(phase_key, 0)
+                lines.append(f"  • {phase_name}: {duration:.2f} 秒")
+        else:
+            lines.append("耗时统计暂无数据")
+        lines.append("")
+
+        lines.append("=" * 80)
+        lines.append("报告结束")
+        lines.append("=" * 80)
+
+        return "\n".join(lines)
 
 
 async def demo_analysis():

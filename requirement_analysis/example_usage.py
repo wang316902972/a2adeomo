@@ -4,7 +4,6 @@
 """
 
 import asyncio
-import json
 from workflow import RequirementAnalysisWorkflow
 from agents import RequirementAnalysisAgents
 
@@ -74,24 +73,16 @@ async def example_full_analysis():
     )
     
     # 执行完整分析
-    result = await workflow.analyze_requirement(requirement_doc)
-    
-    # 打印结果
-    print("\n分析结果摘要：")
-    print("-" * 80)
-    summary = result.get("summary", {})
-    print(f"审批状态: {summary.get('approval_status', '未知')}")
-    print(f"工作量预估: {summary.get('total_effort_days', 0)} 人日")
-    print(f"项目周期: {summary.get('project_duration', '未知')}")
-    print(f"风险等级: {summary.get('risk_level', '未知')}")
-    print(f"\n关键建议:")
-    for rec in summary.get('key_recommendations', []):
-        print(f"  - {rec}")
-    
-    # 保存完整结果到文件
-    with open("analysis_result.json", "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"\n完整分析结果已保存到: analysis_result.json")
+    report = await workflow.analyze_requirement(requirement_doc)
+
+    # 打印格式化报告
+    print("\n")
+    print(report)
+
+    # 保存格式化报告到文件
+    with open("analysis_report.txt", "w", encoding="utf-8") as f:
+        f.write(report)
+    print(f"\n格式化报告已保存到: analysis_report.txt")
 
 
 # ============================================================================
