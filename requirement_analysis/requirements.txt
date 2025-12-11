@@ -1,0 +1,9 @@
+# Requirements for Requirement Analysis System with AutoGen 0.7.0
+autogen-agentchat>=0.7.0,<1.0.0
+autogen-core>=0.7.0,<1.0.0
+autogen-ext[openai]>=0.7.0,<1.0.0
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic>=2.10.0
+python-dotenv==1.0.1
+httpx==0.27.0
